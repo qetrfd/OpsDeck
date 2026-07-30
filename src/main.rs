@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use opsdeck::health::{HealthCheck, check_optional_url};
 use opsdeck::intelligence::{Diagnosis, analyze_project};
 use opsdeck::{
     ProjectStatus, add_project, config_path, load_config, open_in_file_manager, open_in_vscode,
@@ -26,6 +27,10 @@ enum Commands {
         target: String,
     },
     Diagnose {
+        #[arg(default_value = ".", value_name = "PROYECTO_O_RUTA")]
+        target: String,
+    },
+    Health {
         #[arg(default_value = ".", value_name = "PROYECTO_O_RUTA")]
         target: String,
     },
@@ -67,6 +72,13 @@ fn run() -> Result<(), String> {
             let status = project_status(&target)?;
             let diagnosis = analyze_project(&status);
             print_diagnosis(&diagnosis);
+            Ok(())
+        }
+        Some(Commands::Health { target }) => {
+            let project = resolve_project_target(&target)?;
+            let health = check_optional_url(project.health_url.as_deref());
+
+            print_health(&project.name, &health);
             Ok(())
         }
         Some(Commands::Add {
@@ -123,9 +135,8 @@ fn print_home() {
     println!("  opsdeck add <nombre> <ruta> --health-url <url>");
     println!("  opsdeck list");
     println!("  opsdeck status <nombre>");
-    println!("  opsdeck status <ruta>");
     println!("  opsdeck diagnose <nombre>");
-    println!("  opsdeck diagnose <ruta>");
+    println!("  opsdeck health <nombre>");
     println!("  opsdeck open <nombre>");
     println!("  opsdeck open <nombre> --folder");
     println!();
@@ -214,6 +225,55 @@ fn print_status(status: &ProjectStatus) {
         println!("CAMBIOS");
         println!("──────────────────────────────────────────────────");
         println!("{}", status.raw_status);
+    }
+
+    println!();
+}
+
+fn print_health(project_name: &str, health: &HealthCheck) {
+    println!();
+    println!("OPSDECK HEALTH CHECK");
+    println!("──────────────────────────────────────────────────");
+    println!("Proyecto:       {project_name}");
+    println!("Estado:         {}", health.state);
+
+    match &health.url {
+        Some(url) => println!("URL:            {url}"),
+        None => println!("URL:            sin configurar"),
+    }
+
+    match health.status_code {
+        Some(code) => println!("Código HTTP:    {code}"),
+        None => println!("Código HTTP:    no disponible"),
+    }
+
+    match health.latency_ms {
+        Some(latency) => println!("Latencia:       {latency} ms"),
+        None => println!("Latencia:       no disponible"),
+    }
+
+    match &health.content_type {
+        Some(content_type) => println!("Content-Type:   {content_type}"),
+        None => println!("Content-Type:   no disponible"),
+    }
+
+    match health.json_valid {
+        Some(true) => println!("JSON válido:    sí"),
+        Some(false) => println!("JSON válido:    no"),
+        None => println!("JSON válido:    no aplica"),
+    }
+
+    println!("──────────────────────────────────────────────────");
+
+    if let Some(error) = &health.error {
+        println!("Error: {error}");
+    }
+
+    if let Some(preview) = &health.body_preview {
+        println!();
+        println!("RESPUESTA");
+        println!("──────────────────────────────────────────────────");
+        println!("{preview}");
     }
 
     println!();

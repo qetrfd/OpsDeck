@@ -1,3 +1,6 @@
+pub mod health;
+pub mod intelligence;
+
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
