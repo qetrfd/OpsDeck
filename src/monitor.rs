@@ -16,7 +16,7 @@ pub enum MonitorCommand {
 #[derive(Debug, Clone)]
 pub enum MonitorEvent {
     Started { project_name: String },
-    Finished(MonitorResult),
+    Finished(Box<MonitorResult>),
 }
 
 #[derive(Debug, Clone)]
@@ -137,5 +137,7 @@ fn inspect_project(project: Project, event_sender: &Sender<MonitorEvent>) -> boo
         },
     };
 
-    event_sender.send(MonitorEvent::Finished(result)).is_ok()
+    event_sender
+        .send(MonitorEvent::Finished(Box::new(result)))
+        .is_ok()
 }

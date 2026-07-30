@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use opsdeck::health::{HealthCheck, check_optional_url};
-use opsdeck::intelligence::{Diagnosis, analyze_project};
+use opsdeck::intelligence::{Diagnosis, analyze_project_with_health};
 use opsdeck::{
     ProjectStatus, add_project, config_path, load_config, open_in_file_manager, open_in_vscode,
     project_status, resolve_project_target,
@@ -36,14 +36,17 @@ enum Commands {
     },
     Add {
         name: String,
+
         #[arg(default_value = ".")]
         path: PathBuf,
+
         #[arg(long)]
         health_url: Option<String>,
     },
     List,
     Open {
         target: String,
+
         #[arg(long)]
         folder: bool,
     },
@@ -68,19 +71,27 @@ fn run() -> Result<(), String> {
             print_status(&status);
             Ok(())
         }
+
         Some(Commands::Diagnose { target }) => {
             let status = project_status(&target)?;
-            let diagnosis = analyze_project(&status);
+
+            let health = check_optional_url(status.health_url.as_deref());
+
+            let diagnosis = analyze_project_with_health(&status, &health);
+
             print_diagnosis(&diagnosis);
             Ok(())
         }
+
         Some(Commands::Health { target }) => {
             let project = resolve_project_target(&target)?;
+
             let health = check_optional_url(project.health_url.as_deref());
 
             print_health(&project.name, &health);
             Ok(())
         }
+
         Some(Commands::Add {
             name,
             path,
@@ -104,20 +115,25 @@ fn run() -> Result<(), String> {
 
             Ok(())
         }
+
         Some(Commands::List) => print_projects(),
+
         Some(Commands::Open { target, folder }) => {
             let project = resolve_project_target(&target)?;
 
             if folder {
                 open_in_file_manager(&project.path)?;
+
                 println!("Carpeta abierta: {}", project.path.display());
             } else {
                 open_in_vscode(&project.path)?;
+
                 println!("Proyecto abierto en VS Code: {}", project.name);
             }
 
             Ok(())
         }
+
         None => {
             print_home();
             Ok(())
@@ -135,8 +151,11 @@ fn print_home() {
     println!("  opsdeck add <nombre> <ruta> --health-url <url>");
     println!("  opsdeck list");
     println!("  opsdeck status <nombre>");
+    println!("  opsdeck status <ruta>");
     println!("  opsdeck diagnose <nombre>");
+    println!("  opsdeck diagnose <ruta>");
     println!("  opsdeck health <nombre>");
+    println!("  opsdeck health <ruta>");
     println!("  opsdeck open <nombre>");
     println!("  opsdeck open <nombre> --folder");
     println!();
@@ -164,8 +183,12 @@ fn print_projects() -> Result<(), String> {
             println!("   Ruta: {}", project.path.display());
 
             match &project.health_url {
-                Some(url) => println!("   Health: {url}"),
-                None => println!("   Health: sin endpoint"),
+                Some(url) => {
+                    println!("   Health: {url}");
+                }
+                None => {
+                    println!("   Health: sin endpoint");
+                }
             }
 
             if index + 1 < config.projects.len() {
@@ -187,10 +210,12 @@ fn print_status(status: &ProjectStatus) {
     println!("──────────────────────────────────────────────────");
     println!("Proyecto:              {}", status.name);
     println!("Ruta:                  {}", status.path.display());
+
     println!(
         "Registrado:            {}",
         if status.registered { "sí" } else { "no" }
     );
+
     println!("Rama:                  {}", status.branch);
     println!("Archivos con cambios:  {}", status.changes.total);
     println!("Preparados:            {}", status.changes.staged);
@@ -213,8 +238,12 @@ fn print_status(status: &ProjectStatus) {
     }
 
     match &status.health_url {
-        Some(url) => println!("Health:                {url}"),
-        None => println!("Health:                sin endpoint"),
+        Some(url) => {
+            println!("Health:                {url}");
+        }
+        None => {
+            println!("Health:                sin endpoint");
+        }
     }
 
     println!("──────────────────────────────────────────────────");
@@ -238,29 +267,51 @@ fn print_health(project_name: &str, health: &HealthCheck) {
     println!("Estado:         {}", health.state);
 
     match &health.url {
-        Some(url) => println!("URL:            {url}"),
-        None => println!("URL:            sin configurar"),
+        Some(url) => {
+            println!("URL:            {url}");
+        }
+        None => {
+            println!("URL:            sin configurar");
+        }
     }
 
     match health.status_code {
-        Some(code) => println!("Código HTTP:    {code}"),
-        None => println!("Código HTTP:    no disponible"),
+        Some(code) => {
+            println!("Código HTTP:    {code}");
+        }
+        None => {
+            println!("Código HTTP:    no disponible");
+        }
     }
 
     match health.latency_ms {
-        Some(latency) => println!("Latencia:       {latency} ms"),
-        None => println!("Latencia:       no disponible"),
+        Some(latency) => {
+            println!("Latencia:       {latency} ms");
+        }
+        None => {
+            println!("Latencia:       no disponible");
+        }
     }
 
     match &health.content_type {
-        Some(content_type) => println!("Content-Type:   {content_type}"),
-        None => println!("Content-Type:   no disponible"),
+        Some(content_type) => {
+            println!("Content-Type:   {content_type}");
+        }
+        None => {
+            println!("Content-Type:   no disponible");
+        }
     }
 
     match health.json_valid {
-        Some(true) => println!("JSON válido:    sí"),
-        Some(false) => println!("JSON válido:    no"),
-        None => println!("JSON válido:    no aplica"),
+        Some(true) => {
+            println!("JSON válido:    sí");
+        }
+        Some(false) => {
+            println!("JSON válido:    no");
+        }
+        None => {
+            println!("JSON válido:    no aplica");
+        }
     }
 
     println!("──────────────────────────────────────────────────");
@@ -294,12 +345,14 @@ fn print_diagnosis(diagnosis: &Diagnosis) {
     } else {
         for (index, finding) in diagnosis.findings.iter().enumerate() {
             println!();
+
             println!(
                 "{}. {} [{}]",
                 index + 1,
                 finding.title,
                 finding.severity.label()
             );
+
             println!("   Código: {}", finding.code);
             println!("   Análisis: {}", finding.explanation);
             println!("   Acción: {}", finding.action);

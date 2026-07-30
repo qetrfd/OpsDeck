@@ -1,20 +1,23 @@
 use eframe::egui;
-use opsdeck::intelligence::{Diagnosis, analyze_project};
+use opsdeck::health::{HealthCheck, HealthState};
+use opsdeck::intelligence::Diagnosis;
+use opsdeck::monitor::{MonitorEvent, MonitorHandle, MonitorResult, spawn_monitor_worker};
 use opsdeck::{
     Project, ProjectStatus, add_project, config_path, load_config, open_in_file_manager,
-    open_in_vscode, project_status, save_config,
+    open_in_vscode, save_config,
 };
 use rfd::FileDialog;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::sync::mpsc::TryRecvError;
+use std::time::{Duration, Instant, SystemTime};
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("OpsDeck")
-            .with_inner_size([1180.0, 760.0])
-            .with_min_inner_size([900.0, 600.0]),
+            .with_inner_size([1220.0, 790.0])
+            .with_min_inner_size([920.0, 620.0]),
         ..Default::default()
     };
 
@@ -28,24 +31,20 @@ fn main() -> eframe::Result {
 #[derive(Clone)]
 struct ProjectSnapshot {
     status: Option<ProjectStatus>,
+    health: HealthCheck,
     diagnosis: Option<Diagnosis>,
     error: Option<String>,
+    checked_at: SystemTime,
 }
 
-impl ProjectSnapshot {
-    fn success(status: ProjectStatus, diagnosis: Diagnosis) -> Self {
+impl From<MonitorResult> for ProjectSnapshot {
+    fn from(result: MonitorResult) -> Self {
         Self {
-            status: Some(status),
-            diagnosis: Some(diagnosis),
-            error: None,
-        }
-    }
-
-    fn failure(error: String) -> Self {
-        Self {
-            status: None,
-            diagnosis: None,
-            error: Some(error),
+            status: result.status,
+            health: result.health,
+            diagnosis: result.diagnosis,
+            error: result.error,
+            checked_at: result.checked_at,
         }
     }
 }
@@ -53,6 +52,7 @@ impl ProjectSnapshot {
 struct OpsDeckApp {
     projects: Vec<Project>,
     snapshots: HashMap<String, ProjectSnapshot>,
+    checking_projects: HashSet<String>,
     selected_name: Option<String>,
     notice: Option<String>,
     show_add_dialog: bool,
@@ -62,14 +62,19 @@ struct OpsDeckApp {
     delete_target: Option<String>,
     auto_refresh: bool,
     refresh_interval_secs: u64,
-    last_refresh: Instant,
+    last_check_request: Instant,
+    last_result_received: Option<Instant>,
+    monitor: Option<MonitorHandle>,
 }
 
 impl OpsDeckApp {
     fn new(_creation_context: &eframe::CreationContext<'_>) -> Self {
+        let monitor_result = spawn_monitor_worker();
+
         let mut app = Self {
             projects: Vec::new(),
             snapshots: HashMap::new(),
+            checking_projects: HashSet::new(),
             selected_name: None,
             notice: None,
             show_add_dialog: false,
@@ -78,9 +83,20 @@ impl OpsDeckApp {
             new_health_url: String::new(),
             delete_target: None,
             auto_refresh: true,
-            refresh_interval_secs: 30,
-            last_refresh: Instant::now(),
+            refresh_interval_secs: 60,
+            last_check_request: Instant::now(),
+            last_result_received: None,
+            monitor: None,
         };
+
+        match monitor_result {
+            Ok(monitor) => {
+                app.monitor = Some(monitor);
+            }
+            Err(error) => {
+                app.notice = Some(error);
+            }
+        }
 
         app.reload_projects();
         app
@@ -90,6 +106,18 @@ impl OpsDeckApp {
         match load_config() {
             Ok(config) => {
                 self.projects = config.projects;
+
+                self.snapshots.retain(|name, _| {
+                    self.projects
+                        .iter()
+                        .any(|project| project.name.eq_ignore_ascii_case(name))
+                });
+
+                self.checking_projects.retain(|name| {
+                    self.projects
+                        .iter()
+                        .any(|project| project.name.eq_ignore_ascii_case(name))
+                });
 
                 let selected_exists = self
                     .selected_name
@@ -105,39 +133,132 @@ impl OpsDeckApp {
                     self.selected_name = self.projects.first().map(|project| project.name.clone());
                 }
 
-                self.refresh_all_projects();
+                self.request_all_checks();
             }
             Err(error) => {
                 self.projects.clear();
                 self.snapshots.clear();
+                self.checking_projects.clear();
                 self.selected_name = None;
                 self.notice = Some(error);
             }
         }
     }
 
-    fn refresh_all_projects(&mut self) {
-        let projects = self.projects.clone();
-        let mut snapshots = HashMap::new();
-
-        for project in projects {
-            let snapshot = match project_status(&project.name) {
-                Ok(status) => {
-                    let diagnosis = analyze_project(&status);
-                    ProjectSnapshot::success(status, diagnosis)
-                }
-                Err(error) => ProjectSnapshot::failure(error),
-            };
-
-            snapshots.insert(project.name.clone(), snapshot);
+    fn request_all_checks(&mut self) {
+        if self.projects.is_empty() {
+            return;
         }
 
-        self.snapshots = snapshots;
-        self.last_refresh = Instant::now();
+        let projects = self.projects.clone();
+        let names = projects
+            .iter()
+            .map(|project| project.name.clone())
+            .collect::<Vec<_>>();
+
+        for name in &names {
+            self.checking_projects.insert(name.clone());
+        }
+
+        let result = match &self.monitor {
+            Some(monitor) => monitor.check_all(projects),
+            None => Err("El monitor en segundo plano no está disponible".to_string()),
+        };
+
+        match result {
+            Ok(()) => {
+                self.last_check_request = Instant::now();
+            }
+            Err(error) => {
+                for name in names {
+                    self.checking_projects.remove(&name);
+                }
+
+                self.notice = Some(error);
+            }
+        }
     }
 
-    fn select_project(&mut self, name: String) {
-        self.selected_name = Some(name);
+    fn request_project_check(&mut self, project_name: &str) {
+        let Some(project) = self
+            .projects
+            .iter()
+            .find(|project| project.name.eq_ignore_ascii_case(project_name))
+            .cloned()
+        else {
+            self.notice = Some(format!("No se encontró el proyecto {project_name}"));
+            return;
+        };
+
+        self.checking_projects.insert(project.name.clone());
+
+        let result = match &self.monitor {
+            Some(monitor) => monitor.check_project(project.clone()),
+            None => Err("El monitor en segundo plano no está disponible".to_string()),
+        };
+
+        match result {
+            Ok(()) => {
+                self.last_check_request = Instant::now();
+            }
+            Err(error) => {
+                self.checking_projects.remove(&project.name);
+                self.notice = Some(error);
+            }
+        }
+    }
+
+    fn process_monitor_events(&mut self) {
+        let mut events = Vec::new();
+        let mut disconnected = false;
+
+        if let Some(monitor) = self.monitor.as_ref() {
+            loop {
+                match monitor.try_recv() {
+                    Ok(event) => events.push(event),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if disconnected {
+            self.monitor = None;
+            self.checking_projects.clear();
+            self.notice = Some("El worker de monitoreo se desconectó".to_string());
+        }
+
+        for event in events {
+            self.handle_monitor_event(event);
+        }
+    }
+
+    fn handle_monitor_event(&mut self, event: MonitorEvent) {
+        match event {
+            MonitorEvent::Started { project_name } => {
+                self.checking_projects.insert(project_name);
+            }
+            MonitorEvent::Finished(result) => {
+                let result = *result;
+                let project_name = result.project_name.clone();
+
+                self.checking_projects.remove(&project_name);
+                self.last_result_received = Some(Instant::now());
+
+                let project_exists = self
+                    .projects
+                    .iter()
+                    .any(|project| project.name.eq_ignore_ascii_case(&project_name));
+
+                if project_exists {
+                    self.snapshots
+                        .insert(project_name, ProjectSnapshot::from(result));
+                }
+            }
+        }
     }
 
     fn selected_snapshot(&self) -> Option<ProjectSnapshot> {
@@ -217,7 +338,9 @@ impl OpsDeckApp {
                 }
 
                 self.snapshots.remove(name);
+                self.checking_projects.remove(name);
                 self.reload_projects();
+
                 self.notice = Some(format!("El proyecto {name} fue eliminado de OpsDeck"));
             }
             Err(error) => {
@@ -268,8 +391,7 @@ impl OpsDeckApp {
                 }
 
                 if ui.button("Revisar todos").clicked() {
-                    self.refresh_all_projects();
-                    self.notice = Some("Todos los proyectos fueron revisados".to_string());
+                    self.request_all_checks();
                 }
             });
         });
@@ -280,16 +402,35 @@ impl OpsDeckApp {
             ui.checkbox(&mut self.auto_refresh, "Revisión automática");
 
             ui.add(
-                egui::Slider::new(&mut self.refresh_interval_secs, 5..=300)
+                egui::Slider::new(&mut self.refresh_interval_secs, 15..=900)
                     .text("intervalo en segundos"),
             );
 
             ui.separator();
 
-            ui.label(format!(
-                "Última revisión: hace {} s",
-                self.last_refresh.elapsed().as_secs()
-            ));
+            if self.checking_projects.is_empty() {
+                ui.label("Monitor disponible");
+            } else {
+                ui.spinner();
+                ui.label(format!(
+                    "Revisando {} proyecto(s)",
+                    self.checking_projects.len()
+                ));
+            }
+
+            ui.separator();
+
+            match self.last_result_received {
+                Some(last_result) => {
+                    ui.label(format!(
+                        "Último resultado: hace {} s",
+                        last_result.elapsed().as_secs()
+                    ));
+                }
+                None => {
+                    ui.label("Esperando primer resultado");
+                }
+            }
         });
 
         ui.add_space(8.0);
@@ -324,6 +465,7 @@ impl OpsDeckApp {
         let projects = self.projects.clone();
         let mut selected_project = None;
         let mut project_to_delete = None;
+        let mut project_to_check = None;
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -334,6 +476,8 @@ impl OpsDeckApp {
                         .as_ref()
                         .map(|name| name.eq_ignore_ascii_case(&project.name))
                         .unwrap_or(false);
+
+                    let is_checking = self.checking_projects.contains(&project.name);
 
                     let snapshot = self.snapshots.get(&project.name).cloned();
 
@@ -360,31 +504,25 @@ impl OpsDeckApp {
 
                         ui.small(project.path.display().to_string());
 
-                        match snapshot {
-                            Some(snapshot) => {
-                                if let Some(diagnosis) = snapshot.diagnosis {
-                                    ui.label(format!(
-                                        "{} · {}/100",
-                                        diagnosis.risk, diagnosis.score
-                                    ));
-                                } else if snapshot.error.is_some() {
-                                    ui.label("Error durante la revisión");
-                                } else {
-                                    ui.label("Sin diagnóstico");
-                                }
+                        if is_checking {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label("Revisando...");
+                            });
+                        } else if let Some(snapshot) = snapshot {
+                            if let Some(diagnosis) = snapshot.diagnosis {
+                                ui.label(format!("{} · {}/100", diagnosis.risk, diagnosis.score));
+                            } else if snapshot.error.is_some() {
+                                ui.label("Error durante la revisión");
                             }
-                            None => {
-                                ui.label("Sin revisar");
-                            }
+
+                            ui.small(format!("Health: {}", snapshot.health.state));
+                        } else {
+                            ui.label("Sin revisar");
                         }
 
-                        match &project.health_url {
-                            Some(url) => {
-                                ui.small(format!("Health: {url}"));
-                            }
-                            None => {
-                                ui.small("Sin endpoint de health");
-                            }
+                        if ui.small_button("Revisar ahora").clicked() {
+                            project_to_check = Some(project.name.clone());
                         }
                     });
 
@@ -393,11 +531,15 @@ impl OpsDeckApp {
             });
 
         if let Some(name) = selected_project {
-            self.select_project(name);
+            self.selected_name = Some(name);
         }
 
         if let Some(name) = project_to_delete {
             self.delete_target = Some(name);
+        }
+
+        if let Some(name) = project_to_check {
+            self.request_project_check(&name);
         }
 
         ui.separator();
@@ -442,37 +584,51 @@ impl OpsDeckApp {
             return;
         };
 
+        let is_checking = self.checking_projects.contains(&selected_name);
+
         let Some(snapshot) = self.selected_snapshot() else {
             ui.vertical_centered(|ui| {
-                ui.add_space(120.0);
+                ui.add_space(100.0);
                 ui.heading(&selected_name);
-                ui.label("Este proyecto todavía no ha sido revisado.");
+
+                if is_checking {
+                    ui.spinner();
+                    ui.label("Revisando proyecto...");
+                } else {
+                    ui.label("Este proyecto todavía no ha sido revisado.");
+
+                    if ui.button("Revisar ahora").clicked() {
+                        self.request_project_check(&selected_name);
+                    }
+                }
             });
 
             return;
         };
 
-        if let Some(error) = snapshot.error {
+        if let Some(error) = snapshot.error.clone() {
             ui.heading(&selected_name);
             ui.add_space(10.0);
-            ui.label(egui::RichText::new("No se pudo revisar el proyecto").strong());
+
+            ui.label(egui::RichText::new("No se pudo revisar el repositorio").strong());
+
             ui.label(error);
 
             ui.add_space(10.0);
 
             if ui.button("Intentar nuevamente").clicked() {
-                self.refresh_all_projects();
+                self.request_project_check(&selected_name);
             }
 
             return;
         }
 
-        let Some(status) = snapshot.status else {
-            ui.label("No hay información disponible.");
+        let Some(status) = snapshot.status.clone() else {
+            ui.label("No hay información de Git disponible.");
             return;
         };
 
-        let Some(diagnosis) = snapshot.diagnosis else {
+        let Some(diagnosis) = snapshot.diagnosis.clone() else {
             ui.label("No hay diagnóstico disponible.");
             return;
         };
@@ -481,6 +637,11 @@ impl OpsDeckApp {
             ui.vertical(|ui| {
                 ui.heading(egui::RichText::new(&status.name).size(25.0).strong());
                 ui.monospace(status.path.display().to_string());
+
+                ui.small(format!(
+                    "Última revisión: hace {} s",
+                    seconds_since(&snapshot.checked_at)
+                ));
             });
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -490,6 +651,17 @@ impl OpsDeckApp {
 
                 if ui.button("Abrir en VS Code").clicked() {
                     self.open_selected_in_vscode(&status);
+                }
+
+                if ui
+                    .add_enabled(!is_checking, egui::Button::new("Revisar ahora"))
+                    .clicked()
+                {
+                    self.request_project_check(&selected_name);
+                }
+
+                if is_checking {
+                    ui.spinner();
                 }
             });
         });
@@ -527,10 +699,6 @@ impl OpsDeckApp {
                     ui.label(egui::RichText::new("Commits por descargar").strong());
                     ui.label(status.sync.behind.to_string());
                     ui.end_row();
-
-                    ui.label(egui::RichText::new("Health URL").strong());
-                    ui.monospace(status.health_url.as_deref().unwrap_or("Sin endpoint"));
-                    ui.end_row();
                 });
         });
 
@@ -544,6 +712,10 @@ impl OpsDeckApp {
             status_card(ui, "Por subir", status.sync.ahead);
             status_card(ui, "Por descargar", status.sync.behind);
         });
+
+        ui.add_space(10.0);
+
+        show_health_panel(ui, &snapshot.health);
 
         ui.add_space(10.0);
 
@@ -642,28 +814,26 @@ impl OpsDeckApp {
                 ui.horizontal(|ui| {
                     ui.text_edit_singleline(&mut self.new_project_path);
 
-                    if ui.button("Seleccionar").clicked() {
-                        if let Some(path) = FileDialog::new()
+                    if ui.button("Seleccionar").clicked()
+                        && let Some(path) = FileDialog::new()
                             .set_title("Selecciona el repositorio Git")
                             .pick_folder()
+                    {
+                        let fill_name = self.new_project_name.trim().is_empty();
+
+                        self.new_project_path = path.display().to_string();
+
+                        if fill_name
+                            && let Some(name) = path.file_name().and_then(|value| value.to_str())
                         {
-                            let fill_name = self.new_project_name.trim().is_empty();
-
-                            self.new_project_path = path.display().to_string();
-
-                            if fill_name {
-                                if let Some(name) =
-                                    path.file_name().and_then(|value| value.to_str())
-                                {
-                                    self.new_project_name = name.to_string();
-                                }
-                            }
+                            self.new_project_name = name.to_string();
                         }
                     }
                 });
 
                 ui.add_space(8.0);
                 ui.label("Health URL opcional");
+
                 ui.text_edit_singleline(&mut self.new_health_url);
 
                 ui.add_space(5.0);
@@ -712,7 +882,9 @@ impl OpsDeckApp {
             .resizable(false)
             .default_width(420.0)
             .show(context, |ui| {
-                ui.label(format!("¿Quieres eliminar {project_name} de OpsDeck?"));
+                ui.label(format!(
+                    "¿Quieres eliminar {project_name} de OpsDeck?"
+                ));
 
                 ui.add_space(5.0);
 
@@ -744,17 +916,23 @@ impl OpsDeckApp {
 
 impl eframe::App for OpsDeckApp {
     fn logic(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
-        let interval = Duration::from_secs(self.refresh_interval_secs.max(5));
+        self.process_monitor_events();
 
-        if self.auto_refresh && self.last_refresh.elapsed() >= interval {
-            self.refresh_all_projects();
+        let interval = Duration::from_secs(self.refresh_interval_secs.max(15));
+
+        if self.auto_refresh
+            && self.last_check_request.elapsed() >= interval
+            && self.checking_projects.is_empty()
+        {
+            self.request_all_checks();
         }
 
-        context.request_repaint_after(Duration::from_secs(1));
+        context.request_repaint_after(Duration::from_millis(250));
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         ui.style_mut().spacing.item_spacing = egui::vec2(10.0, 10.0);
+
         ui.style_mut().spacing.button_padding = egui::vec2(14.0, 8.0);
 
         let context = ui.ctx().clone();
@@ -765,9 +943,9 @@ impl eframe::App for OpsDeckApp {
 
         egui::Panel::left("projects")
             .resizable(true)
-            .default_size(300.0)
-            .min_size(240.0)
-            .max_size(430.0)
+            .default_size(310.0)
+            .min_size(250.0)
+            .max_size(450.0)
             .show(ui, |ui| {
                 self.show_sidebar(ui);
             });
@@ -781,6 +959,97 @@ impl eframe::App for OpsDeckApp {
     }
 }
 
+fn show_health_panel(ui: &mut egui::Ui, health: &HealthCheck) {
+    ui.group(|ui| {
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.heading("Health");
+                ui.label(egui::RichText::new(health.state.to_string()).strong());
+            });
+
+            ui.with_layout(
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| match health.state {
+                    HealthState::Healthy => {
+                        ui.label("Disponible");
+                    }
+                    HealthState::Degraded => {
+                        ui.label("Atención");
+                    }
+                    HealthState::NotConfigured => {
+                        ui.label("Sin endpoint");
+                    }
+                    _ => {
+                        ui.label("Problema detectado");
+                    }
+                },
+            );
+        });
+
+        ui.add_space(6.0);
+
+        egui::Grid::new("health_information")
+            .num_columns(2)
+            .spacing([28.0, 9.0])
+            .show(ui, |ui| {
+                ui.label(egui::RichText::new("URL").strong());
+                ui.monospace(health.url.as_deref().unwrap_or("Sin configurar"));
+                ui.end_row();
+
+                ui.label(egui::RichText::new("Código HTTP").strong());
+                ui.label(
+                    health
+                        .status_code
+                        .map(|code| code.to_string())
+                        .unwrap_or_else(|| "No disponible".to_string()),
+                );
+                ui.end_row();
+
+                ui.label(egui::RichText::new("Latencia").strong());
+                ui.label(
+                    health
+                        .latency_ms
+                        .map(|latency| format!("{latency} ms"))
+                        .unwrap_or_else(|| "No disponible".to_string()),
+                );
+                ui.end_row();
+
+                ui.label(egui::RichText::new("Content-Type").strong());
+                ui.monospace(health.content_type.as_deref().unwrap_or("No disponible"));
+                ui.end_row();
+
+                ui.label(egui::RichText::new("JSON válido").strong());
+
+                let json_label = match health.json_valid {
+                    Some(true) => "Sí",
+                    Some(false) => "No",
+                    None => "No aplica",
+                };
+
+                ui.label(json_label);
+                ui.end_row();
+            });
+
+        if let Some(error) = &health.error {
+            ui.add_space(8.0);
+
+            ui.label(egui::RichText::new(format!("Error: {error}")).strong());
+        }
+
+        if let Some(preview) = &health.body_preview {
+            ui.add_space(8.0);
+
+            ui.collapsing("Vista previa de la respuesta", |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(130.0)
+                    .show(ui, |ui| {
+                        ui.monospace(preview);
+                    });
+            });
+        }
+    });
+}
+
 fn status_card(ui: &mut egui::Ui, label: &str, value: usize) {
     ui.group(|ui| {
         ui.set_min_width(118.0);
@@ -790,4 +1059,8 @@ fn status_card(ui: &mut egui::Ui, label: &str, value: usize) {
             ui.label(label);
         });
     });
+}
+
+fn seconds_since(time: &SystemTime) -> u64 {
+    time.elapsed().unwrap_or_default().as_secs()
 }

@@ -1,4 +1,5 @@
 use crate::ProjectStatus;
+use crate::health::{HealthCheck, HealthState};
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -84,6 +85,24 @@ pub fn analyze_project(status: &ProjectStatus) -> Diagnosis {
     analyze_branch_risk(status, &mut findings);
     analyze_health_configuration(status, &mut findings);
 
+    build_diagnosis(status, findings)
+}
+
+pub fn analyze_project_with_health(status: &ProjectStatus, health: &HealthCheck) -> Diagnosis {
+    let mut findings = Vec::new();
+
+    analyze_repository_history(status, &mut findings);
+    analyze_remote_configuration(status, &mut findings);
+    analyze_synchronization(status, &mut findings);
+    analyze_working_tree(status, &mut findings);
+    analyze_sensitive_files(status, &mut findings);
+    analyze_branch_risk(status, &mut findings);
+    analyze_health_result(status, health, &mut findings);
+
+    build_diagnosis(status, findings)
+}
+
+fn build_diagnosis(status: &ProjectStatus, findings: Vec<Finding>) -> Diagnosis {
     let total_penalty = findings
         .iter()
         .map(|finding| finding.penalty as u16)
@@ -91,7 +110,6 @@ pub fn analyze_project(status: &ProjectStatus) -> Diagnosis {
         .min(100);
 
     let score = 100_u8.saturating_sub(total_penalty as u8);
-
     let score_risk = risk_from_score(score);
 
     let finding_risk = findings
@@ -126,7 +144,9 @@ fn analyze_repository_history(status: &ProjectStatus, findings: &mut Vec<Finding
 }
 
 fn analyze_remote_configuration(status: &ProjectStatus, findings: &mut Vec<Finding>) {
-    if status.remote.eq_ignore_ascii_case("Sin repositorio remoto") {
+    let remote_missing = status.remote.eq_ignore_ascii_case("Sin repositorio remoto");
+
+    if remote_missing {
         findings.push(Finding {
             code: "REMOTE_MISSING".to_string(),
             title: "El repositorio no tiene un remoto configurado".to_string(),
@@ -138,9 +158,7 @@ fn analyze_remote_configuration(status: &ProjectStatus, findings: &mut Vec<Findi
         });
     }
 
-    if status.sync.upstream.is_none()
-        && !status.remote.eq_ignore_ascii_case("Sin repositorio remoto")
-    {
+    if status.sync.upstream.is_none() && !remote_missing {
         findings.push(Finding {
             code: "UPSTREAM_MISSING".to_string(),
             title: "La rama actual no tiene upstream".to_string(),
@@ -332,7 +350,9 @@ fn analyze_sensitive_files(status: &ProjectStatus, findings: &mut Vec<Finding>) 
 }
 
 fn analyze_branch_risk(status: &ProjectStatus, findings: &mut Vec<Finding>) {
-    let protected_branch = matches!(status.branch.as_str(), "main" | "master" | "production");
+    let branch = status.branch.to_lowercase();
+
+    let protected_branch = matches!(branch.as_str(), "main" | "master" | "production");
 
     if protected_branch && status.changes.total >= 10 {
         findings.push(Finding {
@@ -374,6 +394,94 @@ fn analyze_health_configuration(status: &ProjectStatus, findings: &mut Vec<Findi
             severity: FindingSeverity::Info,
             penalty: 0,
         });
+    }
+}
+
+fn analyze_health_result(
+    status: &ProjectStatus,
+    health: &HealthCheck,
+    findings: &mut Vec<Finding>,
+) {
+    match health.state {
+        HealthState::NotConfigured => {
+            analyze_health_configuration(status, findings);
+        }
+        HealthState::Healthy => {}
+        HealthState::Degraded => {
+            let explanation = if health.json_valid == Some(false) {
+                "El endpoint respondió, pero el contenido JSON no es válido.".to_string()
+            } else if let Some(latency) = health.latency_ms {
+                format!("El endpoint está disponible, pero tardó {latency} ms en responder.")
+            } else {
+                "El endpoint respondió, pero presentó una condición degradada.".to_string()
+            };
+
+            findings.push(Finding {
+                code: "HEALTH_DEGRADED".to_string(),
+                title: "El servicio presenta rendimiento degradado".to_string(),
+                explanation,
+                action: "Revisa la latencia, la respuesta y los registros del servicio."
+                    .to_string(),
+                severity: FindingSeverity::Medium,
+                penalty: 12,
+            });
+        }
+        HealthState::Unhealthy => {
+            let status_code = health
+                .status_code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "desconocido".to_string());
+
+            findings.push(Finding {
+                code: "HEALTH_ENDPOINT_UNHEALTHY".to_string(),
+                title: "El endpoint devolvió un estado HTTP no saludable".to_string(),
+                explanation: format!("El servicio respondió con el código HTTP {status_code}."),
+                action:
+                    "Revisa los logs, la configuración y el estado del servidor antes de desplegar."
+                        .to_string(),
+                severity: FindingSeverity::High,
+                penalty: 25,
+            });
+        }
+        HealthState::Timeout => {
+            findings.push(Finding {
+                code: "HEALTH_TIMEOUT".to_string(),
+                title: "El endpoint excedió el tiempo de espera".to_string(),
+                explanation: "OpsDeck no recibió una respuesta dentro del límite configurado."
+                    .to_string(),
+                action:
+                    "Comprueba la disponibilidad del servidor, la red y posibles procesos lentos."
+                        .to_string(),
+                severity: FindingSeverity::High,
+                penalty: 25,
+            });
+        }
+        HealthState::Unreachable => {
+            findings.push(Finding {
+                code: "HEALTH_UNREACHABLE".to_string(),
+                title: "El servicio no está disponible".to_string(),
+                explanation: health.error.clone().unwrap_or_else(|| {
+                    "OpsDeck no pudo establecer una conexión con el endpoint.".to_string()
+                }),
+                action: "Comprueba el dominio, HTTPS, DNS, servidor y configuración del servicio."
+                    .to_string(),
+                severity: FindingSeverity::High,
+                penalty: 25,
+            });
+        }
+        HealthState::InvalidUrl => {
+            findings.push(Finding {
+                code: "HEALTH_INVALID_URL".to_string(),
+                title: "La URL de health no es válida".to_string(),
+                explanation: health.error.clone().unwrap_or_else(|| {
+                    "La dirección configurada no puede utilizarse como endpoint HTTP.".to_string()
+                }),
+                action: "Edita el proyecto y registra una URL que comience con http:// o https://."
+                    .to_string(),
+                severity: FindingSeverity::Medium,
+                penalty: 12,
+            });
+        }
     }
 }
 
@@ -437,6 +545,7 @@ fn build_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::health::{HealthCheck, HealthState};
     use crate::{ChangeSummary, ProjectStatus, SyncStatus};
     use std::path::PathBuf;
 
@@ -459,9 +568,22 @@ mod tests {
         }
     }
 
+    fn healthy_health() -> HealthCheck {
+        HealthCheck {
+            url: Some("https://example.com/health".to_string()),
+            state: HealthState::Healthy,
+            status_code: Some(200),
+            latency_ms: Some(120),
+            content_type: Some("application/json".to_string()),
+            json_valid: Some(true),
+            body_preview: Some("{\"ok\":true}".to_string()),
+            error: None,
+        }
+    }
+
     #[test]
     fn healthy_project_receives_full_score() {
-        let diagnosis = analyze_project(&healthy_status());
+        let diagnosis = analyze_project_with_health(&healthy_status(), &healthy_health());
 
         assert_eq!(diagnosis.score, 100);
         assert_eq!(diagnosis.risk, RiskLevel::Healthy);
@@ -474,9 +596,10 @@ mod tests {
         status.changes.untracked = 1;
         status.raw_status = "?? .env".to_string();
 
-        let diagnosis = analyze_project(&status);
+        let diagnosis = analyze_project_with_health(&status, &healthy_health());
 
         assert_eq!(diagnosis.risk, RiskLevel::Critical);
+
         assert!(
             diagnosis
                 .findings
@@ -491,8 +614,33 @@ mod tests {
         status.sync.ahead = 2;
         status.sync.behind = 3;
 
-        let diagnosis = analyze_project(&status);
+        let diagnosis = analyze_project_with_health(&status, &healthy_health());
 
         assert_eq!(diagnosis.risk, RiskLevel::Critical);
+    }
+
+    #[test]
+    fn unavailable_health_creates_high_risk() {
+        let health = HealthCheck {
+            url: Some("https://example.com/health".to_string()),
+            state: HealthState::Unreachable,
+            status_code: None,
+            latency_ms: Some(5000),
+            content_type: None,
+            json_valid: None,
+            body_preview: None,
+            error: Some("No se pudo conectar".to_string()),
+        };
+
+        let diagnosis = analyze_project_with_health(&healthy_status(), &health);
+
+        assert_eq!(diagnosis.risk, RiskLevel::High);
+
+        assert!(
+            diagnosis
+                .findings
+                .iter()
+                .any(|finding| finding.code == "HEALTH_UNREACHABLE")
+        );
     }
 }
