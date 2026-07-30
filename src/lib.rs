@@ -1,5 +1,7 @@
 pub mod health;
+pub mod history;
 pub mod intelligence;
+pub mod monitor;
 
 use serde::{Deserialize, Serialize};
 use std::env;
