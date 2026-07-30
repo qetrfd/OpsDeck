@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use opsdeck::intelligence::{Diagnosis, analyze_project};
 use opsdeck::{
     ProjectStatus, add_project, config_path, load_config, open_in_file_manager, open_in_vscode,
     project_status, resolve_project_target,
@@ -10,7 +11,7 @@ use std::process::ExitCode;
 #[command(
     name = "opsdeck",
     version,
-    about = "Panel local para administrar proyectos de desarrollo"
+    about = "Centro de control local para proyectos de desarrollo"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -21,6 +22,10 @@ struct Cli {
 enum Commands {
     #[command(alias = "st")]
     Status {
+        #[arg(default_value = ".", value_name = "PROYECTO_O_RUTA")]
+        target: String,
+    },
+    Diagnose {
         #[arg(default_value = ".", value_name = "PROYECTO_O_RUTA")]
         target: String,
     },
@@ -56,6 +61,12 @@ fn run() -> Result<(), String> {
         Some(Commands::Status { target }) => {
             let status = project_status(&target)?;
             print_status(&status);
+            Ok(())
+        }
+        Some(Commands::Diagnose { target }) => {
+            let status = project_status(&target)?;
+            let diagnosis = analyze_project(&status);
+            print_diagnosis(&diagnosis);
             Ok(())
         }
         Some(Commands::Add {
@@ -105,7 +116,7 @@ fn run() -> Result<(), String> {
 fn print_home() {
     println!();
     println!("OpsDeck");
-    println!("Centro de control para proyectos de desarrollo");
+    println!("Centro de control local para proyectos de desarrollo");
     println!();
     println!("Comandos disponibles:");
     println!("  opsdeck add <nombre> <ruta>");
@@ -113,6 +124,8 @@ fn print_home() {
     println!("  opsdeck list");
     println!("  opsdeck status <nombre>");
     println!("  opsdeck status <ruta>");
+    println!("  opsdeck diagnose <nombre>");
+    println!("  opsdeck diagnose <ruta>");
     println!("  opsdeck open <nombre>");
     println!("  opsdeck open <nombre> --folder");
     println!();
@@ -201,6 +214,37 @@ fn print_status(status: &ProjectStatus) {
         println!("CAMBIOS");
         println!("──────────────────────────────────────────────────");
         println!("{}", status.raw_status);
+    }
+
+    println!();
+}
+
+fn print_diagnosis(diagnosis: &Diagnosis) {
+    println!();
+    println!("OPSDECK INTELLIGENCE");
+    println!("──────────────────────────────────────────────────");
+    println!("Puntuación: {}/100", diagnosis.score);
+    println!("Nivel:      {}", diagnosis.risk);
+    println!();
+    println!("{}", diagnosis.summary);
+    println!("──────────────────────────────────────────────────");
+
+    if diagnosis.findings.is_empty() {
+        println!("No se encontraron problemas.");
+    } else {
+        for (index, finding) in diagnosis.findings.iter().enumerate() {
+            println!();
+            println!(
+                "{}. {} [{}]",
+                index + 1,
+                finding.title,
+                finding.severity.label()
+            );
+            println!("   Código: {}", finding.code);
+            println!("   Análisis: {}", finding.explanation);
+            println!("   Acción: {}", finding.action);
+            println!("   Penalización: -{}", finding.penalty);
+        }
     }
 
     println!();
