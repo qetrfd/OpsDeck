@@ -1,4 +1,5 @@
 use eframe::egui;
+use opsdeck::anomaly::AnomalyReport;
 use opsdeck::health::{HealthCheck, HealthState};
 use opsdeck::history::{FeedbackSummary, ReviewRecord, feedback_summary, record_feedback};
 use opsdeck::history_ui::show_history_panel;
@@ -36,6 +37,7 @@ struct ProjectSnapshot {
     health: HealthCheck,
     diagnosis: Option<Diagnosis>,
     history: Vec<ReviewRecord>,
+    anomaly_report: AnomalyReport,
     feedback: HashMap<String, FeedbackSummary>,
     error: Option<String>,
     history_error: Option<String>,
@@ -51,6 +53,7 @@ impl From<MonitorResult> for ProjectSnapshot {
             health: result.health,
             diagnosis: result.diagnosis,
             history: result.history,
+            anomaly_report: result.anomaly_report,
             feedback,
             error: result.error,
             history_error: result.history_error,
@@ -103,6 +106,7 @@ impl OpsDeckApp {
             Ok(monitor) => {
                 app.monitor = Some(monitor);
             }
+
             Err(error) => {
                 app.notice = Some(error);
             }
@@ -145,6 +149,7 @@ impl OpsDeckApp {
 
                 self.request_all_checks();
             }
+
             Err(error) => {
                 self.projects.clear();
                 self.snapshots.clear();
@@ -178,6 +183,7 @@ impl OpsDeckApp {
 
         let result = match &self.monitor {
             Some(monitor) => monitor.check_all(projects),
+
             None => Err("El monitor en segundo plano no está disponible".to_string()),
         };
 
@@ -185,6 +191,7 @@ impl OpsDeckApp {
             Ok(()) => {
                 self.last_check_request = Instant::now();
             }
+
             Err(error) => {
                 for name in names {
                     self.checking_projects.remove(&name);
@@ -215,6 +222,7 @@ impl OpsDeckApp {
 
         let result = match &self.monitor {
             Some(monitor) => monitor.check_project(project.clone()),
+
             None => Err("El monitor en segundo plano no está disponible".to_string()),
         };
 
@@ -222,6 +230,7 @@ impl OpsDeckApp {
             Ok(()) => {
                 self.last_check_request = Instant::now();
             }
+
             Err(error) => {
                 self.checking_projects.remove(&project.name);
 
@@ -240,9 +249,11 @@ impl OpsDeckApp {
                     Ok(event) => {
                         events.push(event);
                     }
+
                     Err(TryRecvError::Empty) => {
                         break;
                     }
+
                     Err(TryRecvError::Disconnected) => {
                         disconnected = true;
                         break;
@@ -293,6 +304,7 @@ impl OpsDeckApp {
 
     fn selected_snapshot(&self) -> Option<ProjectSnapshot> {
         let name = self.selected_name.as_ref()?;
+
         self.snapshots.get(name).cloned()
     }
 
@@ -328,7 +340,6 @@ impl OpsDeckApp {
                 self.new_health_url.clear();
 
                 self.show_add_dialog = false;
-
                 self.selected_name = Some(project_name.clone());
 
                 self.reload_projects();
@@ -337,6 +348,7 @@ impl OpsDeckApp {
                     "El proyecto {project_name} fue registrado correctamente"
                 ));
             }
+
             Err(error) => {
                 self.notice = Some(error);
             }
@@ -346,6 +358,7 @@ impl OpsDeckApp {
     fn delete_project(&mut self, name: &str) {
         let result = (|| -> Result<(), String> {
             let mut config = load_config()?;
+
             let previous_count = config.projects.len();
 
             config
@@ -372,12 +385,14 @@ impl OpsDeckApp {
                 }
 
                 self.snapshots.remove(name);
+
                 self.checking_projects.remove(name);
 
                 self.reload_projects();
 
                 self.notice = Some(format!("El proyecto {name} fue eliminado de OpsDeck"));
             }
+
             Err(error) => {
                 self.notice = Some(error);
             }
@@ -402,6 +417,8 @@ impl OpsDeckApp {
                 self.notice = Some(format!(
                     "Retroalimentación guardada: {rule_code} fue marcada como {answer}"
                 ));
+
+                self.request_project_check(project_name);
             }
 
             Err(error) => {
@@ -415,6 +432,7 @@ impl OpsDeckApp {
             Ok(()) => {
                 self.notice = Some(format!("{} se abrió en Visual Studio Code", status.name));
             }
+
             Err(error) => {
                 self.notice = Some(error);
             }
@@ -426,6 +444,7 @@ impl OpsDeckApp {
             Ok(()) => {
                 self.notice = Some(format!("Carpeta abierta: {}", status.path.display()));
             }
+
             Err(error) => {
                 self.notice = Some(error);
             }
@@ -491,6 +510,7 @@ impl OpsDeckApp {
                         last_result.elapsed().as_secs()
                     ));
                 }
+
                 None => {
                     ui.label("Esperando primer resultado");
                 }
@@ -573,6 +593,7 @@ impl OpsDeckApp {
                         if is_checking {
                             ui.horizontal(|ui| {
                                 ui.spinner();
+
                                 ui.label("Revisando...");
                             });
                         } else if let Some(snapshot) = snapshot {
@@ -587,6 +608,12 @@ impl OpsDeckApp {
                             ui.small(format!("Health: {}", snapshot.health.state));
 
                             ui.small(format!("Historial: {} registros", snapshot.history.len()));
+
+                            ui.small(if snapshot.anomaly_report.deploy_ready {
+                                "Deploy: permitido"
+                            } else {
+                                "Deploy: no recomendado"
+                            });
                         } else {
                             ui.label("Sin revisar");
                         }
@@ -682,13 +709,11 @@ impl OpsDeckApp {
 
         if let Some(error) = snapshot.error.clone() {
             ui.heading(&selected_name);
-
             ui.add_space(10.0);
 
             ui.label(egui::RichText::new("No se pudo revisar el repositorio").strong());
 
             ui.label(error);
-
             ui.add_space(10.0);
 
             if ui.button("Intentar nuevamente").clicked() {
@@ -759,6 +784,7 @@ impl OpsDeckApp {
                             ui.label(egui::RichText::new("Rama").strong());
 
                             ui.monospace(&status.branch);
+
                             ui.end_row();
 
                             ui.label(egui::RichText::new("Último commit").strong());
@@ -816,6 +842,10 @@ impl OpsDeckApp {
                 ui.add_space(10.0);
 
                 show_history_panel(ui, &snapshot.history);
+
+                ui.add_space(10.0);
+
+                show_anomaly_panel(ui, &snapshot.anomaly_report);
 
                 if let Some(error) = &snapshot.history_error {
                     ui.add_space(5.0);
@@ -885,7 +915,7 @@ impl OpsDeckApp {
                                             ui.add_space(3.0);
 
                                             ui.small(format!(
-                                                "Regla: {} · Penalización: -{}",
+                                                "Regla: {} · Penalización adaptada: -{}",
                                                 finding.code, finding.penalty
                                             ));
 
@@ -921,6 +951,7 @@ impl OpsDeckApp {
                 ui.add_space(10.0);
 
                 ui.heading("Cambios locales");
+
                 ui.separator();
 
                 if status.raw_status.trim().is_empty() {
@@ -1030,39 +1061,41 @@ impl OpsDeckApp {
         let mut confirm_clicked = false;
         let mut cancel_clicked = false;
 
-        egui::Window::new("Eliminar proyecto")
-            .collapsible(false)
-            .resizable(false)
-            .default_width(420.0)
-            .show(context, |ui| {
-                ui.label(format!(
-                    "¿Quieres eliminar {project_name} de OpsDeck?"
-                ));
+        egui::Window::new(
+            "Eliminar proyecto",
+        )
+        .collapsible(false)
+        .resizable(false)
+        .default_width(420.0)
+        .show(context, |ui| {
+            ui.label(format!(
+                "¿Quieres eliminar {project_name} de OpsDeck?"
+            ));
 
-                ui.add_space(5.0);
+            ui.add_space(5.0);
 
-                ui.label(
-                    "Esto solamente lo quitará de la lista. Los archivos y el repositorio no serán eliminados.",
-                );
+            ui.label(
+                "Esto solamente lo quitará de la lista. Los archivos y el repositorio no serán eliminados.",
+            );
 
-                ui.add_space(12.0);
+            ui.add_space(12.0);
 
-                ui.horizontal(|ui| {
-                    if ui
-                        .button("Eliminar")
-                        .clicked()
-                    {
-                        confirm_clicked = true;
-                    }
+            ui.horizontal(|ui| {
+                if ui
+                    .button("Eliminar")
+                    .clicked()
+                {
+                    confirm_clicked = true;
+                }
 
-                    if ui
-                        .button("Cancelar")
-                        .clicked()
-                    {
-                        cancel_clicked = true;
-                    }
-                });
+                if ui
+                    .button("Cancelar")
+                    .clicked()
+                {
+                    cancel_clicked = true;
+                }
             });
+        });
 
         if confirm_clicked {
             self.delete_project(&project_name);
@@ -1134,12 +1167,15 @@ fn show_health_panel(ui: &mut egui::Ui, health: &HealthCheck) {
                     HealthState::Healthy => {
                         ui.label("Disponible");
                     }
+
                     HealthState::Degraded => {
                         ui.label("Atención");
                     }
+
                     HealthState::NotConfigured => {
                         ui.label("Sin endpoint");
                     }
+
                     _ => {
                         ui.label("Problema detectado");
                     }
@@ -1214,6 +1250,55 @@ fn show_health_panel(ui: &mut egui::Ui, health: &HealthCheck) {
                     .show(ui, |ui| {
                         ui.monospace(preview);
                     });
+            });
+        }
+    });
+}
+
+fn show_anomaly_panel(ui: &mut egui::Ui, report: &AnomalyReport) {
+    ui.group(|ui| {
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.heading("Análisis de anomalías");
+
+                ui.label(
+                    egui::RichText::new(if report.deploy_ready {
+                        "Listo para deploy"
+                    } else {
+                        "Deploy no recomendado"
+                    })
+                    .strong(),
+                );
+            });
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(format!("{} anomalía(s)", report.anomalies.len()));
+            });
+        });
+
+        ui.add_space(6.0);
+
+        ui.label(&report.summary);
+
+        if report.anomalies.is_empty() {
+            return;
+        }
+
+        ui.add_space(8.0);
+
+        for anomaly in &report.anomalies {
+            ui.collapsing(format!("{} · {}", anomaly.severity, anomaly.title), |ui| {
+                ui.label(&anomaly.explanation);
+
+                ui.add_space(5.0);
+
+                ui.label(
+                    egui::RichText::new(format!("Acción recomendada: {}", anomaly.action)).strong(),
+                );
+
+                ui.add_space(3.0);
+
+                ui.small(format!("Código: {}", anomaly.code));
             });
         }
     });

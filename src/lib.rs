@@ -1,3 +1,4 @@
+pub mod anomaly;
 pub mod health;
 pub mod history;
 pub mod history_ui;

@@ -1,3 +1,4 @@
+use crate::anomaly::{AnomalyReport, detect_anomalies};
 use crate::health::{HealthCheck, check_optional_url};
 use crate::history::{ReviewRecord, feedback_for_project, recent_reviews, record_review};
 use crate::intelligence::{Diagnosis, analyze_project_with_health};
@@ -29,6 +30,7 @@ pub struct MonitorResult {
     pub health: HealthCheck,
     pub diagnosis: Option<Diagnosis>,
     pub history: Vec<ReviewRecord>,
+    pub anomaly_report: AnomalyReport,
     pub error: Option<String>,
     pub history_error: Option<String>,
     pub checked_at: SystemTime,
@@ -130,6 +132,7 @@ fn inspect_project(project: Project, event_sender: &Sender<MonitorEvent>) -> boo
             health,
             diagnosis: None,
             history: Vec::new(),
+            anomaly_report: unavailable_anomaly_report(),
             error: Some(error),
             history_error: None,
             checked_at: SystemTime::now(),
@@ -179,14 +182,25 @@ fn inspect_valid_project(
         }
     };
 
+    let anomaly_report = detect_anomalies(&history);
+
     MonitorResult {
         project_name,
         status: Some(status),
         health,
         diagnosis: Some(diagnosis),
         history,
+        anomaly_report,
         error: None,
         history_error,
         checked_at: SystemTime::now(),
+    }
+}
+
+fn unavailable_anomaly_report() -> AnomalyReport {
+    AnomalyReport {
+        anomalies: Vec::new(),
+        deploy_ready: false,
+        summary: "No fue posible determinar si el proyecto está listo para deploy.".to_string(),
     }
 }
