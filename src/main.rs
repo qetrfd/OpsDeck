@@ -1,9 +1,12 @@
 use clap::{Parser, Subcommand};
-use opsdeck::anomaly::detect_anomalies;
+use opsdeck::anomaly::{AnomalyReport, detect_anomalies};
 use opsdeck::checklist::{DeployChecklist, evaluate_deploy_checklist};
-use opsdeck::gate::{DeployGate, evaluate_deploy_gate, export_gate_manifest};
+use opsdeck::gate::{
+    DeployGate, DeployPolicy, PolicyPreset, evaluate_deploy_gate, export_gate_manifest,
+    load_policy, policy_path, reset_policy, save_policy,
+};
 use opsdeck::health::{HealthCheck, check_optional_url};
-use opsdeck::history::{feedback_for_project, recent_reviews, record_review};
+use opsdeck::history::{ReviewRecord, feedback_for_project, recent_reviews, record_review};
 use opsdeck::intelligence::{Diagnosis, analyze_project_with_health};
 use opsdeck::learning::apply_feedback;
 use opsdeck::report::export_deploy_report;
@@ -67,6 +70,11 @@ enum Commands {
         output: Option<PathBuf>,
     },
 
+    Policy {
+        #[command(subcommand)]
+        command: PolicyCommands,
+    },
+
     Add {
         name: String,
 
@@ -85,6 +93,36 @@ enum Commands {
         #[arg(long)]
         folder: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum PolicyCommands {
+    Show {
+        #[arg(default_value = ".", value_name = "PROYECTO_O_RUTA")]
+        target: String,
+    },
+
+    Set {
+        #[arg(value_name = "PROYECTO_O_RUTA")]
+        target: String,
+
+        #[arg(value_name = "PRESET")]
+        preset: PolicyPreset,
+    },
+
+    Reset {
+        #[arg(value_name = "PROYECTO_O_RUTA")]
+        target: String,
+    },
+}
+
+struct EvaluationBundle {
+    status: ProjectStatus,
+    health: HealthCheck,
+    diagnosis: Diagnosis,
+    history: Vec<ReviewRecord>,
+    anomaly_report: AnomalyReport,
+    checklist: DeployChecklist,
 }
 
 fn main() -> ExitCode {
@@ -121,6 +159,7 @@ fn run() -> Result<(), String> {
             let diagnosis = apply_feedback(&status, base_diagnosis, &feedback);
 
             print_diagnosis(&diagnosis);
+
             Ok(())
         }
 
@@ -130,74 +169,44 @@ fn run() -> Result<(), String> {
             let health = check_optional_url(project.health_url.as_deref());
 
             print_health(&project.name, &health);
+
             Ok(())
         }
 
         Some(Commands::Checklist { target }) => {
-            let status = project_status(&target)?;
+            let evaluation = evaluate_for_deploy(&target)?;
 
-            let health = check_optional_url(status.health_url.as_deref());
-
-            let feedback = feedback_for_project(&status.name)?;
-
-            let base_diagnosis = analyze_project_with_health(&status, &health);
-
-            let diagnosis = apply_feedback(&status, base_diagnosis, &feedback);
-
-            record_review(&status.name, &status, &health, &diagnosis)?;
-
-            let history = recent_reviews(&status.name, 30)?;
-
-            let anomaly_report = detect_anomalies(&history);
-
-            let checklist =
-                evaluate_deploy_checklist(&status, &health, &diagnosis, &anomaly_report);
-
-            print_checklist(&status.name, &checklist);
+            print_checklist(&evaluation.status.name, &evaluation.checklist);
 
             Ok(())
         }
 
         Some(Commands::Report { target, output }) => {
-            let status = project_status(&target)?;
-
-            let health = check_optional_url(status.health_url.as_deref());
-
-            let feedback = feedback_for_project(&status.name)?;
-
-            let base_diagnosis = analyze_project_with_health(&status, &health);
-
-            let diagnosis = apply_feedback(&status, base_diagnosis, &feedback);
-
-            record_review(&status.name, &status, &health, &diagnosis)?;
-
-            let history = recent_reviews(&status.name, 30)?;
-
-            let anomaly_report = detect_anomalies(&history);
-
-            let checklist =
-                evaluate_deploy_checklist(&status, &health, &diagnosis, &anomaly_report);
+            let evaluation = evaluate_for_deploy(&target)?;
 
             let path = export_deploy_report(
-                &status.name,
-                &status,
-                &health,
-                &diagnosis,
-                &history,
-                &anomaly_report,
+                &evaluation.status.name,
+                &evaluation.status,
+                &evaluation.health,
+                &evaluation.diagnosis,
+                &evaluation.history,
+                &evaluation.anomaly_report,
                 output.as_deref(),
             )?;
 
             println!();
             println!("Informe de deploy generado");
+
             println!("────────────────────────────────────────");
-            println!("Proyecto: {}", status.name);
+
+            println!("Proyecto: {}", evaluation.status.name);
+
             println!("Archivo:  {}", path.display());
 
             println!(
-                "Decisión: {}",
-                if checklist.ready {
-                    if checklist.warnings > 0 {
+                "Decisión base: {}",
+                if evaluation.checklist.ready {
+                    if evaluation.checklist.warnings > 0 {
                         "Permitido con advertencias"
                     } else {
                         "Aprobado"
@@ -209,10 +218,13 @@ fn run() -> Result<(), String> {
 
             println!(
                 "Aprobados: {} · Advertencias: {} · Bloqueados: {}",
-                checklist.passed, checklist.warnings, checklist.failed
+                evaluation.checklist.passed,
+                evaluation.checklist.warnings,
+                evaluation.checklist.failed
             );
 
             println!("────────────────────────────────────────");
+
             println!();
 
             Ok(())
@@ -223,33 +235,22 @@ fn run() -> Result<(), String> {
             strict,
             output,
         }) => {
-            let status = project_status(&target)?;
+            let evaluation = evaluate_for_deploy(&target)?;
 
-            let health = check_optional_url(status.health_url.as_deref());
+            let mut policy = load_policy(&evaluation.status.name)?;
 
-            let feedback = feedback_for_project(&status.name)?;
-
-            let base_diagnosis = analyze_project_with_health(&status, &health);
-
-            let diagnosis = apply_feedback(&status, base_diagnosis, &feedback);
-
-            record_review(&status.name, &status, &health, &diagnosis)?;
-
-            let history = recent_reviews(&status.name, 30)?;
-
-            let anomaly_report = detect_anomalies(&history);
-
-            let checklist =
-                evaluate_deploy_checklist(&status, &health, &diagnosis, &anomaly_report);
+            if strict {
+                policy.strict_warnings = true;
+            }
 
             let gate = evaluate_deploy_gate(
-                &status.name,
-                &status,
-                &health,
-                &diagnosis,
-                &anomaly_report,
-                &checklist,
-                strict,
+                &evaluation.status.name,
+                &evaluation.status,
+                &evaluation.health,
+                &evaluation.diagnosis,
+                &evaluation.anomaly_report,
+                &evaluation.checklist,
+                &policy,
             );
 
             let path = export_gate_manifest(&gate, output.as_deref())?;
@@ -259,9 +260,11 @@ fn run() -> Result<(), String> {
             if gate.ready {
                 Ok(())
             } else {
-                Err("OpsDeck Gate bloqueó el deploy".to_string())
+                Err("OpsDeck Gate bloqueó el deploy.".to_string())
             }
         }
+
+        Some(Commands::Policy { command }) => run_policy_command(command),
 
         Some(Commands::Add {
             name,
@@ -272,8 +275,11 @@ fn run() -> Result<(), String> {
 
             println!();
             println!("Proyecto registrado");
+
             println!("────────────────────────────────────────");
+
             println!("Nombre: {}", project.name);
+
             println!("Ruta:   {}", project.path.display());
 
             match project.health_url {
@@ -287,6 +293,7 @@ fn run() -> Result<(), String> {
             }
 
             println!("────────────────────────────────────────");
+
             println!();
 
             Ok(())
@@ -317,48 +324,169 @@ fn run() -> Result<(), String> {
     }
 }
 
+fn run_policy_command(command: PolicyCommands) -> Result<(), String> {
+    match command {
+        PolicyCommands::Show { target } => {
+            let status = project_status(&target)?;
+
+            let policy = load_policy(&status.name)?;
+
+            let path = policy_path()?;
+
+            print_policy(&status.name, &policy, &path);
+
+            Ok(())
+        }
+
+        PolicyCommands::Set { target, preset } => {
+            let status = project_status(&target)?;
+
+            let policy = DeployPolicy::from_preset(preset);
+
+            let path = save_policy(&status.name, &policy)?;
+
+            println!();
+            println!("Política actualizada");
+
+            println!("────────────────────────────────────────");
+
+            println!("Proyecto: {}", status.name);
+
+            println!("Política: {} ({})", policy.preset.label(), policy.preset);
+
+            println!("Archivo:  {}", path.display());
+
+            println!("────────────────────────────────────────");
+
+            println!();
+
+            Ok(())
+        }
+
+        PolicyCommands::Reset { target } => {
+            let status = project_status(&target)?;
+
+            let removed = reset_policy(&status.name)?;
+
+            println!();
+
+            if removed {
+                println!("Política restablecida");
+
+                println!("{} volverá a utilizar la política balanced.", status.name);
+            } else {
+                println!(
+                    "{} ya utilizaba la política balanced predeterminada.",
+                    status.name
+                );
+            }
+
+            println!();
+
+            Ok(())
+        }
+    }
+}
+
+fn evaluate_for_deploy(target: &str) -> Result<EvaluationBundle, String> {
+    let status = project_status(target)?;
+
+    let health = check_optional_url(status.health_url.as_deref());
+
+    let feedback = feedback_for_project(&status.name)?;
+
+    let base_diagnosis = analyze_project_with_health(&status, &health);
+
+    let diagnosis = apply_feedback(&status, base_diagnosis, &feedback);
+
+    record_review(&status.name, &status, &health, &diagnosis)?;
+
+    let history = recent_reviews(&status.name, 30)?;
+
+    let anomaly_report = detect_anomalies(&history);
+
+    let checklist = evaluate_deploy_checklist(&status, &health, &diagnosis, &anomaly_report);
+
+    Ok(EvaluationBundle {
+        status,
+        health,
+        diagnosis,
+        history,
+        anomaly_report,
+        checklist,
+    })
+}
+
 fn print_home() {
     println!();
     println!("OpsDeck");
+
     println!("Centro de control local para proyectos de desarrollo");
+
     println!();
     println!("Comandos disponibles:");
+
     println!("  opsdeck add <nombre> <ruta>");
+
     println!("  opsdeck add <nombre> <ruta> --health-url <url>");
+
     println!("  opsdeck list");
     println!("  opsdeck status <nombre>");
-    println!("  opsdeck status <ruta>");
+
     println!("  opsdeck diagnose <nombre>");
-    println!("  opsdeck diagnose <ruta>");
+
     println!("  opsdeck health <nombre>");
-    println!("  opsdeck health <ruta>");
+
     println!("  opsdeck checklist <nombre>");
-    println!("  opsdeck checklist <ruta>");
+
     println!("  opsdeck report <nombre>");
+
     println!("  opsdeck report <nombre> --output <archivo.md>");
+
     println!("  opsdeck gate <nombre>");
+
     println!("  opsdeck gate <nombre> --strict");
+
     println!("  opsdeck gate <nombre> --output <archivo.json>");
+
+    println!("  opsdeck policy show <nombre>");
+
+    println!("  opsdeck policy set <nombre> development");
+
+    println!("  opsdeck policy set <nombre> balanced");
+
+    println!("  opsdeck policy set <nombre> production");
+
+    println!("  opsdeck policy reset <nombre>");
+
     println!("  opsdeck open <nombre>");
+
     println!("  opsdeck open <nombre> --folder");
+
     println!();
     println!("Aplicación gráfica:");
+
     println!("  cargo run --bin opsdeck-desktop");
+
     println!();
 }
 
 fn print_projects() -> Result<(), String> {
     let config = load_config()?;
+
     let path = config_path()?;
 
     println!();
     println!("OPSDECK PROJECTS");
+
     println!("────────────────────────────────────────");
 
     if config.projects.is_empty() {
         println!("No hay proyectos registrados");
+
         println!();
         println!("Registra uno con:");
+
         println!("opsdeck add \"Nombre\" /ruta/del/proyecto");
     } else {
         for (index, project) in config.projects.iter().enumerate() {
@@ -383,7 +511,9 @@ fn print_projects() -> Result<(), String> {
     }
 
     println!("────────────────────────────────────────");
+
     println!("Configuración: {}", path.display());
+
     println!();
 
     Ok(())
@@ -392,7 +522,9 @@ fn print_projects() -> Result<(), String> {
 fn print_status(status: &ProjectStatus) {
     println!();
     println!("OPSDECK PROJECT STATUS");
+
     println!("──────────────────────────────────────────────────");
+
     println!("Proyecto:              {}", status.name);
 
     println!("Ruta:                  {}", status.path.display());
@@ -467,6 +599,7 @@ fn print_health(project_name: &str, health: &HealthCheck) {
     println!("──────────────────────────────────────────────────");
 
     println!("Proyecto:       {project_name}");
+
     println!("Estado:         {}", health.state);
 
     match &health.url {
@@ -550,6 +683,7 @@ fn print_diagnosis(diagnosis: &Diagnosis) {
     println!("Puntuación: {}/100", diagnosis.score);
 
     println!("Nivel:      {}", diagnosis.risk);
+
     println!();
     println!("{}", diagnosis.summary);
 
@@ -618,6 +752,7 @@ fn print_checklist(project_name: &str, checklist: &DeployChecklist) {
         println!("{}. [{}] {}", index + 1, item.state, item.title);
 
         println!("   Código: {}", item.code);
+
         println!("   Detalle: {}", item.detail);
     }
 
@@ -630,11 +765,18 @@ fn print_gate(gate: &DeployGate, path: &Path) {
 
     println!("──────────────────────────────────────────────────");
 
+    println!(
+        "Política: {} ({})",
+        gate.policy.preset.label(),
+        gate.policy.preset
+    );
+
     println!("Decisión: {}", gate.decision);
 
     println!("Listo:    {}", if gate.ready { "sí" } else { "no" });
 
     println!("Archivo:  {}", path.display());
+
     println!();
     println!("{}", gate.summary);
 
@@ -657,4 +799,59 @@ fn print_gate(gate: &DeployGate, path: &Path) {
     }
 
     println!();
+}
+
+fn print_policy(project_name: &str, policy: &DeployPolicy, path: &Path) {
+    println!();
+    println!("OPSDECK DEPLOY POLICY");
+
+    println!("──────────────────────────────────────────────────");
+
+    println!("Proyecto:              {project_name}");
+
+    println!(
+        "Preset:                {} ({})",
+        policy.preset.label(),
+        policy.preset
+    );
+
+    println!("Descripción:           {}", policy.preset.description());
+
+    println!("Bloquear advertencias: {}", yes_no(policy.strict_warnings));
+
+    println!("Puntuación mínima:     {}/100", policy.minimum_score);
+
+    println!("Health obligatorio:    {}", yes_no(policy.require_health));
+
+    println!(
+        "Árbol limpio:          {}",
+        yes_no(policy.require_clean_tree)
+    );
+
+    println!(
+        "Commits ahead:         {}",
+        if policy.allow_commits_ahead {
+            "permitidos"
+        } else {
+            "bloqueados"
+        }
+    );
+
+    println!(
+        "Latencia máxima:       {}",
+        policy
+            .max_latency_ms
+            .map(|value| { format!("{value} ms") })
+            .unwrap_or_else(|| { "sin límite".to_string() })
+    );
+
+    println!("Archivo:               {}", path.display());
+
+    println!("──────────────────────────────────────────────────");
+
+    println!();
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "sí" } else { "no" }
 }

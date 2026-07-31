@@ -1,6 +1,6 @@
 use crate::anomaly::{AnomalyReport, detect_anomalies};
 use crate::checklist::{DeployChecklist, evaluate_deploy_checklist};
-use crate::gate::{DeployGate, evaluate_deploy_gate};
+use crate::gate::{DeployGate, DeployPolicy, evaluate_deploy_gate, load_policy};
 use crate::health::{HealthCheck, check_optional_url};
 use crate::history::{ReviewRecord, feedback_for_project, recent_reviews, record_review};
 use crate::intelligence::{Diagnosis, analyze_project_with_health};
@@ -43,6 +43,7 @@ pub struct MonitorResult {
 
 pub struct MonitorHandle {
     command_sender: Sender<MonitorCommand>,
+
     event_receiver: Receiver<MonitorEvent>,
 }
 
@@ -128,30 +129,16 @@ fn inspect_project(project: Project, event_sender: &Sender<MonitorEvent>) -> boo
 
     let health = check_optional_url(project.health_url.as_deref());
 
+    let (policy, policy_error) = match load_policy(&project_name) {
+        Ok(policy) => (policy, None),
+
+        Err(error) => (DeployPolicy::default(), Some(error)),
+    };
+
     let result = match project_status(&target) {
-        Ok(status) => inspect_valid_project(project_name, status, health),
+        Ok(status) => inspect_valid_project(project_name, status, health, policy, policy_error),
 
-        Err(error) => {
-            let gate =
-                DeployGate::unavailable(project_name.clone(), "El repositorio no pudo analizarse.");
-
-            MonitorResult {
-                project_name,
-                status: None,
-                health,
-                diagnosis: None,
-                history: Vec::new(),
-
-                anomaly_report: unavailable_anomaly_report(),
-
-                checklist: DeployChecklist::unavailable("El repositorio no pudo analizarse."),
-
-                gate,
-                error: Some(error),
-                history_error: None,
-                checked_at: SystemTime::now(),
-            }
-        }
+        Err(error) => inspect_invalid_project(project_name, health, policy, policy_error, error),
     };
 
     event_sender
@@ -159,10 +146,52 @@ fn inspect_project(project: Project, event_sender: &Sender<MonitorEvent>) -> boo
         .is_ok()
 }
 
+fn inspect_invalid_project(
+    project_name: String,
+    health: HealthCheck,
+    policy: DeployPolicy,
+    policy_error: Option<String>,
+    repository_error: String,
+) -> MonitorResult {
+    let gate_reason = match policy_error {
+        Some(policy_error) => {
+            format!(
+                "El repositorio no pudo analizarse. Además, la política no pudo cargarse: {policy_error}"
+            )
+        }
+
+        None => "El repositorio no pudo analizarse.".to_string(),
+    };
+
+    let gate = DeployGate::unavailable(project_name.clone(), gate_reason, &policy);
+
+    MonitorResult {
+        project_name,
+        status: None,
+        health,
+        diagnosis: None,
+        history: Vec::new(),
+
+        anomaly_report: unavailable_anomaly_report(),
+
+        checklist: DeployChecklist::unavailable("El repositorio no pudo analizarse."),
+
+        gate,
+
+        error: Some(repository_error),
+
+        history_error: None,
+
+        checked_at: SystemTime::now(),
+    }
+}
+
 fn inspect_valid_project(
     project_name: String,
     status: ProjectStatus,
     health: HealthCheck,
+    policy: DeployPolicy,
+    policy_error: Option<String>,
 ) -> MonitorResult {
     let mut history_error = None;
 
@@ -202,27 +231,41 @@ fn inspect_valid_project(
 
     let checklist = evaluate_deploy_checklist(&status, &health, &diagnosis, &anomaly_report);
 
-    let gate = evaluate_deploy_gate(
-        &project_name,
-        &status,
-        &health,
-        &diagnosis,
-        &anomaly_report,
-        &checklist,
-        false,
-    );
+    let gate = match policy_error {
+        Some(error) => DeployGate::unavailable(
+            project_name.clone(),
+            format!("No se pudo cargar la política del proyecto: {error}"),
+            &policy,
+        ),
+
+        None => evaluate_deploy_gate(
+            &project_name,
+            &status,
+            &health,
+            &diagnosis,
+            &anomaly_report,
+            &checklist,
+            &policy,
+        ),
+    };
 
     MonitorResult {
         project_name,
         status: Some(status),
+
         health,
+
         diagnosis: Some(diagnosis),
+
         history,
         anomaly_report,
         checklist,
         gate,
+
         error: None,
+
         history_error,
+
         checked_at: SystemTime::now(),
     }
 }
@@ -230,6 +273,7 @@ fn inspect_valid_project(
 fn unavailable_anomaly_report() -> AnomalyReport {
     AnomalyReport {
         anomalies: Vec::new(),
+
         deploy_ready: false,
 
         summary: "No fue posible determinar si el proyecto está listo para deploy.".to_string(),
