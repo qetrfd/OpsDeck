@@ -1,8 +1,10 @@
 use clap::{Parser, Subcommand};
+use opsdeck::anomaly::detect_anomalies;
 use opsdeck::health::{HealthCheck, check_optional_url};
-use opsdeck::history::feedback_for_project;
+use opsdeck::history::{feedback_for_project, recent_reviews, record_review};
 use opsdeck::intelligence::{Diagnosis, analyze_project_with_health};
 use opsdeck::learning::apply_feedback;
+use opsdeck::report::export_deploy_report;
 use opsdeck::{
     ProjectStatus, add_project, config_path, load_config, open_in_file_manager, open_in_vscode,
     project_status, resolve_project_target,
@@ -28,14 +30,25 @@ enum Commands {
         #[arg(default_value = ".", value_name = "PROYECTO_O_RUTA")]
         target: String,
     },
+
     Diagnose {
         #[arg(default_value = ".", value_name = "PROYECTO_O_RUTA")]
         target: String,
     },
+
     Health {
         #[arg(default_value = ".", value_name = "PROYECTO_O_RUTA")]
         target: String,
     },
+
+    Report {
+        #[arg(default_value = ".", value_name = "PROYECTO_O_RUTA")]
+        target: String,
+
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+
     Add {
         name: String,
 
@@ -45,7 +58,9 @@ enum Commands {
         #[arg(long)]
         health_url: Option<String>,
     },
+
     List,
+
     Open {
         target: String,
 
@@ -70,6 +85,7 @@ fn run() -> Result<(), String> {
     match cli.command {
         Some(Commands::Status { target }) => {
             let status = project_status(&target)?;
+
             print_status(&status);
             Ok(())
         }
@@ -98,6 +114,54 @@ fn run() -> Result<(), String> {
             Ok(())
         }
 
+        Some(Commands::Report { target, output }) => {
+            let status = project_status(&target)?;
+
+            let health = check_optional_url(status.health_url.as_deref());
+
+            let feedback = feedback_for_project(&status.name)?;
+
+            let base_diagnosis = analyze_project_with_health(&status, &health);
+
+            let diagnosis = apply_feedback(&status, base_diagnosis, &feedback);
+
+            record_review(&status.name, &status, &health, &diagnosis)?;
+
+            let history = recent_reviews(&status.name, 30)?;
+
+            let anomaly_report = detect_anomalies(&history);
+
+            let path = export_deploy_report(
+                &status.name,
+                &status,
+                &health,
+                &diagnosis,
+                &history,
+                &anomaly_report,
+                output.as_deref(),
+            )?;
+
+            println!();
+            println!("Informe de deploy generado");
+            println!("────────────────────────────────────────");
+            println!("Proyecto: {}", status.name);
+            println!("Archivo:  {}", path.display());
+
+            println!(
+                "Decisión: {}",
+                if anomaly_report.deploy_ready {
+                    "Aprobado"
+                } else {
+                    "No recomendado"
+                }
+            );
+
+            println!("────────────────────────────────────────");
+            println!();
+
+            Ok(())
+        }
+
         Some(Commands::Add {
             name,
             path,
@@ -112,8 +176,13 @@ fn run() -> Result<(), String> {
             println!("Ruta:   {}", project.path.display());
 
             match project.health_url {
-                Some(url) => println!("Health: {url}"),
-                None => println!("Health: sin endpoint"),
+                Some(url) => {
+                    println!("Health: {url}");
+                }
+
+                None => {
+                    println!("Health: sin endpoint");
+                }
             }
 
             println!("────────────────────────────────────────");
@@ -162,6 +231,8 @@ fn print_home() {
     println!("  opsdeck diagnose <ruta>");
     println!("  opsdeck health <nombre>");
     println!("  opsdeck health <ruta>");
+    println!("  opsdeck report <nombre>");
+    println!("  opsdeck report <nombre> --output <archivo.md>");
     println!("  opsdeck open <nombre>");
     println!("  opsdeck open <nombre> --folder");
     println!();
@@ -192,6 +263,7 @@ fn print_projects() -> Result<(), String> {
                 Some(url) => {
                     println!("   Health: {url}");
                 }
+
                 None => {
                     println!("   Health: sin endpoint");
                 }
@@ -233,6 +305,7 @@ fn print_status(status: &ProjectStatus) {
     println!("Archivos nuevos:       {}", status.changes.untracked);
 
     println!("Último commit:         {}", status.last_commit);
+
     println!("Remoto:                {}", status.remote);
 
     match &status.sync.upstream {
@@ -367,6 +440,7 @@ fn print_diagnosis(diagnosis: &Diagnosis) {
     println!("──────────────────────────────────────────────────");
 
     println!("Puntuación: {}/100", diagnosis.score);
+
     println!("Nivel:      {}", diagnosis.risk);
     println!();
     println!("{}", diagnosis.summary);

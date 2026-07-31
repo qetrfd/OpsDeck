@@ -5,6 +5,7 @@ use opsdeck::history::{FeedbackSummary, ReviewRecord, feedback_summary, record_f
 use opsdeck::history_ui::show_history_panel;
 use opsdeck::intelligence::Diagnosis;
 use opsdeck::monitor::{MonitorEvent, MonitorHandle, MonitorResult, spawn_monitor_worker};
+use opsdeck::report::{export_deploy_report, suggested_report_filename};
 use opsdeck::{
     Project, ProjectStatus, add_project, config_path, load_config, open_in_file_manager,
     open_in_vscode, save_config,
@@ -340,6 +341,7 @@ impl OpsDeckApp {
                 self.new_health_url.clear();
 
                 self.show_add_dialog = false;
+
                 self.selected_name = Some(project_name.clone());
 
                 self.reload_projects();
@@ -419,6 +421,47 @@ impl OpsDeckApp {
                 ));
 
                 self.request_project_check(project_name);
+            }
+
+            Err(error) => {
+                self.notice = Some(error);
+            }
+        }
+    }
+
+    fn export_selected_report(&mut self, project_name: &str, snapshot: &ProjectSnapshot) {
+        let Some(status) = snapshot.status.as_ref() else {
+            self.notice = Some("No hay información del repositorio para exportar".to_string());
+            return;
+        };
+
+        let Some(diagnosis) = snapshot.diagnosis.as_ref() else {
+            self.notice = Some("No hay diagnóstico para exportar".to_string());
+            return;
+        };
+
+        let filename = suggested_report_filename(project_name);
+
+        let Some(path) = FileDialog::new()
+            .set_title("Guardar informe de deploy")
+            .set_file_name(&filename)
+            .add_filter("Markdown", &["md"])
+            .save_file()
+        else {
+            return;
+        };
+
+        match export_deploy_report(
+            project_name,
+            status,
+            &snapshot.health,
+            diagnosis,
+            &snapshot.history,
+            &snapshot.anomaly_report,
+            Some(path.as_path()),
+        ) {
+            Ok(path) => {
+                self.notice = Some(format!("Informe guardado en {}", path.display()));
             }
 
             Err(error) => {
@@ -749,6 +792,10 @@ impl OpsDeckApp {
                     });
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Exportar informe").clicked() {
+                            self.export_selected_report(&selected_name, &snapshot);
+                        }
+
                         if ui.button("Abrir carpeta").clicked() {
                             self.open_selected_folder(&status);
                         }

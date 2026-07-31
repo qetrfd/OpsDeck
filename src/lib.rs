@@ -5,6 +5,7 @@ pub mod history_ui;
 pub mod intelligence;
 pub mod learning;
 pub mod monitor;
+pub mod report;
 
 use serde::{Deserialize, Serialize};
 use std::env;
