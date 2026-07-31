@@ -1,5 +1,6 @@
 pub mod health;
 pub mod history;
+pub mod history_ui;
 pub mod intelligence;
 pub mod monitor;
 

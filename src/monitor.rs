@@ -1,10 +1,12 @@
 use crate::health::{HealthCheck, check_optional_url};
-use crate::history::record_review;
+use crate::history::{ReviewRecord, recent_reviews, record_review};
 use crate::intelligence::{Diagnosis, analyze_project_with_health};
 use crate::{Project, ProjectStatus, project_status};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread;
 use std::time::SystemTime;
+
+const HISTORY_LIMIT: usize = 30;
 
 #[derive(Debug, Clone)]
 pub enum MonitorCommand {
@@ -25,6 +27,7 @@ pub struct MonitorResult {
     pub status: Option<ProjectStatus>,
     pub health: HealthCheck,
     pub diagnosis: Option<Diagnosis>,
+    pub history: Vec<ReviewRecord>,
     pub error: Option<String>,
     pub history_error: Option<String>,
     pub checked_at: SystemTime,
@@ -61,6 +64,7 @@ impl Drop for MonitorHandle {
 
 pub fn spawn_monitor_worker() -> Result<MonitorHandle, String> {
     let (command_sender, command_receiver) = channel::<MonitorCommand>();
+
     let (event_sender, event_receiver) = channel::<MonitorEvent>();
 
     thread::Builder::new()
@@ -84,6 +88,7 @@ fn run_worker(command_receiver: Receiver<MonitorCommand>, event_sender: Sender<M
                     break;
                 }
             }
+
             MonitorCommand::CheckAll(projects) => {
                 for project in projects {
                     if !inspect_project(project, &event_sender) {
@@ -91,6 +96,7 @@ fn run_worker(command_receiver: Receiver<MonitorCommand>, event_sender: Sender<M
                     }
                 }
             }
+
             MonitorCommand::Shutdown => break,
         }
     }
@@ -107,30 +113,48 @@ fn inspect_project(project: Project, event_sender: &Sender<MonitorEvent>) -> boo
     }
 
     let project_name = project.name.clone();
+
     let target = project.path.to_string_lossy().to_string();
+
     let health = check_optional_url(project.health_url.as_deref());
 
     let result = match project_status(&target) {
         Ok(status) => {
             let diagnosis = analyze_project_with_health(&status, &health);
 
-            let history_error = record_review(&project_name, &status, &health, &diagnosis).err();
+            let mut history_error =
+                record_review(&project_name, &status, &health, &diagnosis).err();
+
+            let history = match recent_reviews(&project_name, HISTORY_LIMIT) {
+                Ok(records) => records,
+
+                Err(error) => {
+                    if history_error.is_none() {
+                        history_error = Some(error);
+                    }
+
+                    Vec::new()
+                }
+            };
 
             MonitorResult {
                 project_name,
                 status: Some(status),
                 health,
                 diagnosis: Some(diagnosis),
+                history,
                 error: None,
                 history_error,
                 checked_at: SystemTime::now(),
             }
         }
+
         Err(error) => MonitorResult {
             project_name,
             status: None,
             health,
             diagnosis: None,
+            history: Vec::new(),
             error: Some(error),
             history_error: None,
             checked_at: SystemTime::now(),

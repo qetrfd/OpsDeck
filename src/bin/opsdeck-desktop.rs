@@ -1,5 +1,7 @@
 use eframe::egui;
 use opsdeck::health::{HealthCheck, HealthState};
+use opsdeck::history::{FeedbackSummary, ReviewRecord, feedback_summary, record_feedback};
+use opsdeck::history_ui::show_history_panel;
 use opsdeck::intelligence::Diagnosis;
 use opsdeck::monitor::{MonitorEvent, MonitorHandle, MonitorResult, spawn_monitor_worker};
 use opsdeck::{
@@ -33,17 +35,25 @@ struct ProjectSnapshot {
     status: Option<ProjectStatus>,
     health: HealthCheck,
     diagnosis: Option<Diagnosis>,
+    history: Vec<ReviewRecord>,
+    feedback: HashMap<String, FeedbackSummary>,
     error: Option<String>,
+    history_error: Option<String>,
     checked_at: SystemTime,
 }
 
 impl From<MonitorResult> for ProjectSnapshot {
     fn from(result: MonitorResult) -> Self {
+        let feedback = load_feedback_map(&result.project_name, result.diagnosis.as_ref());
+
         Self {
             status: result.status,
             health: result.health,
             diagnosis: result.diagnosis,
+            history: result.history,
+            feedback,
             error: result.error,
+            history_error: result.history_error,
             checked_at: result.checked_at,
         }
     }
@@ -150,7 +160,13 @@ impl OpsDeckApp {
             return;
         }
 
+        if !self.checking_projects.is_empty() {
+            self.notice = Some("Ya hay una revisión en curso".to_string());
+            return;
+        }
+
         let projects = self.projects.clone();
+
         let names = projects
             .iter()
             .map(|project| project.name.clone())
@@ -190,6 +206,11 @@ impl OpsDeckApp {
             return;
         };
 
+        if self.checking_projects.contains(&project.name) {
+            self.notice = Some(format!("{} ya se está revisando", project.name));
+            return;
+        }
+
         self.checking_projects.insert(project.name.clone());
 
         let result = match &self.monitor {
@@ -203,6 +224,7 @@ impl OpsDeckApp {
             }
             Err(error) => {
                 self.checking_projects.remove(&project.name);
+
                 self.notice = Some(error);
             }
         }
@@ -215,8 +237,12 @@ impl OpsDeckApp {
         if let Some(monitor) = self.monitor.as_ref() {
             loop {
                 match monitor.try_recv() {
-                    Ok(event) => events.push(event),
-                    Err(TryRecvError::Empty) => break,
+                    Ok(event) => {
+                        events.push(event);
+                    }
+                    Err(TryRecvError::Empty) => {
+                        break;
+                    }
                     Err(TryRecvError::Disconnected) => {
                         disconnected = true;
                         break;
@@ -228,6 +254,7 @@ impl OpsDeckApp {
         if disconnected {
             self.monitor = None;
             self.checking_projects.clear();
+
             self.notice = Some("El worker de monitoreo se desconectó".to_string());
         }
 
@@ -241,11 +268,14 @@ impl OpsDeckApp {
             MonitorEvent::Started { project_name } => {
                 self.checking_projects.insert(project_name);
             }
+
             MonitorEvent::Finished(result) => {
                 let result = *result;
+
                 let project_name = result.project_name.clone();
 
                 self.checking_projects.remove(&project_name);
+
                 self.last_result_received = Some(Instant::now());
 
                 let project_exists = self
@@ -268,7 +298,9 @@ impl OpsDeckApp {
 
     fn save_new_project(&mut self) {
         let name = self.new_project_name.trim().to_string();
+
         let path = self.new_project_path.trim().to_string();
+
         let health_url = self.new_health_url.trim().to_string();
 
         if name.is_empty() {
@@ -294,7 +326,9 @@ impl OpsDeckApp {
                 self.new_project_name.clear();
                 self.new_project_path.clear();
                 self.new_health_url.clear();
+
                 self.show_add_dialog = false;
+
                 self.selected_name = Some(project_name.clone());
 
                 self.reload_projects();
@@ -339,10 +373,37 @@ impl OpsDeckApp {
 
                 self.snapshots.remove(name);
                 self.checking_projects.remove(name);
+
                 self.reload_projects();
 
                 self.notice = Some(format!("El proyecto {name} fue eliminado de OpsDeck"));
             }
+            Err(error) => {
+                self.notice = Some(error);
+            }
+        }
+    }
+
+    fn save_rule_feedback(&mut self, project_name: &str, rule_code: &str, useful: bool) {
+        match record_feedback(project_name, rule_code, useful) {
+            Ok(_) => {
+                if let Some(snapshot) = self.snapshots.get_mut(project_name) {
+                    let summary = snapshot.feedback.entry(rule_code.to_string()).or_default();
+
+                    if useful {
+                        summary.useful += 1;
+                    } else {
+                        summary.not_useful += 1;
+                    }
+                }
+
+                let answer = if useful { "útil" } else { "no útil" };
+
+                self.notice = Some(format!(
+                    "Retroalimentación guardada: {rule_code} fue marcada como {answer}"
+                ));
+            }
+
             Err(error) => {
                 self.notice = Some(error);
             }
@@ -377,6 +438,7 @@ impl OpsDeckApp {
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.heading(egui::RichText::new("OpsDeck").size(27.0).strong());
+
                 ui.label("Centro de control local para tus proyectos");
             });
 
@@ -387,6 +449,7 @@ impl OpsDeckApp {
 
                 if ui.button("Recargar configuración").clicked() {
                     self.reload_projects();
+
                     self.notice = Some("Configuración recargada".to_string());
                 }
 
@@ -412,6 +475,7 @@ impl OpsDeckApp {
                 ui.label("Monitor disponible");
             } else {
                 ui.spinner();
+
                 ui.label(format!(
                     "Revisando {} proyecto(s)",
                     self.checking_projects.len()
@@ -453,6 +517,7 @@ impl OpsDeckApp {
 
         if self.projects.is_empty() {
             ui.label("No hay proyectos registrados.");
+
             ui.add_space(8.0);
 
             if ui.button("Agregar primer proyecto").clicked() {
@@ -463,6 +528,7 @@ impl OpsDeckApp {
         }
 
         let projects = self.projects.clone();
+
         let mut selected_project = None;
         let mut project_to_delete = None;
         let mut project_to_check = None;
@@ -514,9 +580,13 @@ impl OpsDeckApp {
                                 ui.label(format!("{} · {}/100", diagnosis.risk, diagnosis.score));
                             } else if snapshot.error.is_some() {
                                 ui.label("Error durante la revisión");
+                            } else {
+                                ui.label("Sin diagnóstico");
                             }
 
                             ui.small(format!("Health: {}", snapshot.health.state));
+
+                            ui.small(format!("Historial: {} registros", snapshot.history.len()));
                         } else {
                             ui.label("Sin revisar");
                         }
@@ -571,7 +641,9 @@ impl OpsDeckApp {
         let Some(selected_name) = self.selected_name.clone() else {
             ui.vertical_centered(|ui| {
                 ui.add_space(120.0);
+
                 ui.heading("No hay un proyecto seleccionado");
+
                 ui.label("Agrega o selecciona un proyecto en la barra lateral.");
 
                 ui.add_space(10.0);
@@ -589,10 +661,12 @@ impl OpsDeckApp {
         let Some(snapshot) = self.selected_snapshot() else {
             ui.vertical_centered(|ui| {
                 ui.add_space(100.0);
+
                 ui.heading(&selected_name);
 
                 if is_checking {
                     ui.spinner();
+
                     ui.label("Revisando proyecto...");
                 } else {
                     ui.label("Este proyecto todavía no ha sido revisado.");
@@ -608,6 +682,7 @@ impl OpsDeckApp {
 
         if let Some(error) = snapshot.error.clone() {
             ui.heading(&selected_name);
+
             ui.add_space(10.0);
 
             ui.label(egui::RichText::new("No se pudo revisar el repositorio").strong());
@@ -633,161 +708,234 @@ impl OpsDeckApp {
             return;
         };
 
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.heading(egui::RichText::new(&status.name).size(25.0).strong());
-                ui.monospace(status.path.display().to_string());
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.heading(egui::RichText::new(&status.name).size(25.0).strong());
 
-                ui.small(format!(
-                    "Última revisión: hace {} s",
-                    seconds_since(&snapshot.checked_at)
-                ));
-            });
+                        ui.monospace(status.path.display().to_string());
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Abrir carpeta").clicked() {
-                    self.open_selected_folder(&status);
-                }
+                        ui.small(format!(
+                            "Última revisión: hace {} s",
+                            seconds_since(&snapshot.checked_at,)
+                        ));
+                    });
 
-                if ui.button("Abrir en VS Code").clicked() {
-                    self.open_selected_in_vscode(&status);
-                }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Abrir carpeta").clicked() {
+                            self.open_selected_folder(&status);
+                        }
 
-                if ui
-                    .add_enabled(!is_checking, egui::Button::new("Revisar ahora"))
-                    .clicked()
-                {
-                    self.request_project_check(&selected_name);
-                }
+                        if ui.button("Abrir en VS Code").clicked() {
+                            self.open_selected_in_vscode(&status);
+                        }
 
-                if is_checking {
-                    ui.spinner();
-                }
-            });
-        });
+                        if ui
+                            .add_enabled(!is_checking, egui::Button::new("Revisar ahora"))
+                            .clicked()
+                        {
+                            self.request_project_check(&selected_name);
+                        }
 
-        ui.add_space(10.0);
-
-        ui.group(|ui| {
-            ui.heading(status.state_label());
-            ui.add_space(8.0);
-
-            egui::Grid::new("repository_information")
-                .num_columns(2)
-                .spacing([28.0, 10.0])
-                .show(ui, |ui| {
-                    ui.label(egui::RichText::new("Rama").strong());
-                    ui.monospace(&status.branch);
-                    ui.end_row();
-
-                    ui.label(egui::RichText::new("Último commit").strong());
-                    ui.label(&status.last_commit);
-                    ui.end_row();
-
-                    ui.label(egui::RichText::new("Remoto").strong());
-                    ui.monospace(&status.remote);
-                    ui.end_row();
-
-                    ui.label(egui::RichText::new("Upstream").strong());
-                    ui.monospace(status.sync.upstream.as_deref().unwrap_or("Sin upstream"));
-                    ui.end_row();
-
-                    ui.label(egui::RichText::new("Commits por subir").strong());
-                    ui.label(status.sync.ahead.to_string());
-                    ui.end_row();
-
-                    ui.label(egui::RichText::new("Commits por descargar").strong());
-                    ui.label(status.sync.behind.to_string());
-                    ui.end_row();
-                });
-        });
-
-        ui.add_space(10.0);
-
-        ui.horizontal_wrapped(|ui| {
-            status_card(ui, "Cambios", status.changes.total);
-            status_card(ui, "Preparados", status.changes.staged);
-            status_card(ui, "Sin preparar", status.changes.unstaged);
-            status_card(ui, "Nuevos", status.changes.untracked);
-            status_card(ui, "Por subir", status.sync.ahead);
-            status_card(ui, "Por descargar", status.sync.behind);
-        });
-
-        ui.add_space(10.0);
-
-        show_health_panel(ui, &snapshot.health);
-
-        ui.add_space(10.0);
-
-        ui.group(|ui| {
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.heading("OpsDeck Intelligence");
-                    ui.label(egui::RichText::new(diagnosis.risk.to_string()).strong());
-                });
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new(format!("{}/100", diagnosis.score))
-                            .size(28.0)
-                            .strong(),
-                    );
-                });
-            });
-
-            ui.add_space(6.0);
-            ui.label(&diagnosis.summary);
-            ui.add_space(8.0);
-
-            if diagnosis.findings.is_empty() {
-                ui.label("No se encontraron problemas.");
-            } else {
-                egui::ScrollArea::vertical()
-                    .max_height(240.0)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        for finding in &diagnosis.findings {
-                            ui.collapsing(
-                                format!("{} · {}", finding.severity.label(), finding.title),
-                                |ui| {
-                                    ui.label(&finding.explanation);
-                                    ui.add_space(5.0);
-
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "Acción recomendada: {}",
-                                            finding.action
-                                        ))
-                                        .strong(),
-                                    );
-
-                                    ui.add_space(3.0);
-
-                                    ui.small(format!(
-                                        "Regla: {} · Penalización: -{}",
-                                        finding.code, finding.penalty
-                                    ));
-                                },
-                            );
+                        if is_checking {
+                            ui.spinner();
                         }
                     });
-            }
-        });
-
-        ui.add_space(10.0);
-        ui.heading("Cambios locales");
-        ui.separator();
-
-        if status.raw_status.trim().is_empty() {
-            ui.label("No hay cambios locales pendientes.");
-        } else {
-            egui::ScrollArea::vertical()
-                .max_height(230.0)
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    ui.monospace(&status.raw_status);
                 });
-        }
+
+                ui.add_space(10.0);
+
+                ui.group(|ui| {
+                    ui.heading(status.state_label());
+
+                    ui.add_space(8.0);
+
+                    egui::Grid::new("repository_information")
+                        .num_columns(2)
+                        .spacing([28.0, 10.0])
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new("Rama").strong());
+
+                            ui.monospace(&status.branch);
+                            ui.end_row();
+
+                            ui.label(egui::RichText::new("Último commit").strong());
+
+                            ui.label(&status.last_commit);
+
+                            ui.end_row();
+
+                            ui.label(egui::RichText::new("Remoto").strong());
+
+                            ui.monospace(&status.remote);
+
+                            ui.end_row();
+
+                            ui.label(egui::RichText::new("Upstream").strong());
+
+                            ui.monospace(status.sync.upstream.as_deref().unwrap_or("Sin upstream"));
+
+                            ui.end_row();
+
+                            ui.label(egui::RichText::new("Commits por subir").strong());
+
+                            ui.label(status.sync.ahead.to_string());
+
+                            ui.end_row();
+
+                            ui.label(egui::RichText::new("Commits por descargar").strong());
+
+                            ui.label(status.sync.behind.to_string());
+
+                            ui.end_row();
+                        });
+                });
+
+                ui.add_space(10.0);
+
+                ui.horizontal_wrapped(|ui| {
+                    status_card(ui, "Cambios", status.changes.total);
+
+                    status_card(ui, "Preparados", status.changes.staged);
+
+                    status_card(ui, "Sin preparar", status.changes.unstaged);
+
+                    status_card(ui, "Nuevos", status.changes.untracked);
+
+                    status_card(ui, "Por subir", status.sync.ahead);
+
+                    status_card(ui, "Por descargar", status.sync.behind);
+                });
+
+                ui.add_space(10.0);
+
+                show_health_panel(ui, &snapshot.health);
+
+                ui.add_space(10.0);
+
+                show_history_panel(ui, &snapshot.history);
+
+                if let Some(error) = &snapshot.history_error {
+                    ui.add_space(5.0);
+
+                    ui.label(
+                        egui::RichText::new(format!("No se pudo actualizar el historial: {error}"))
+                            .strong(),
+                    );
+                }
+
+                ui.add_space(10.0);
+
+                let mut feedback_action: Option<(String, bool)> = None;
+
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.heading("OpsDeck Intelligence");
+
+                            ui.label(egui::RichText::new(diagnosis.risk.to_string()).strong());
+                        });
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new(format!("{}/100", diagnosis.score))
+                                    .size(28.0)
+                                    .strong(),
+                            );
+                        });
+                    });
+
+                    ui.add_space(6.0);
+
+                    ui.label(&diagnosis.summary);
+
+                    ui.add_space(8.0);
+
+                    if diagnosis.findings.is_empty() {
+                        ui.label("No se encontraron problemas.");
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .max_height(320.0)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                for finding in &diagnosis.findings {
+                                    let summary = snapshot
+                                        .feedback
+                                        .get(&finding.code)
+                                        .copied()
+                                        .unwrap_or_default();
+
+                                    ui.collapsing(
+                                        format!("{} · {}", finding.severity.label(), finding.title),
+                                        |ui| {
+                                            ui.label(&finding.explanation);
+
+                                            ui.add_space(5.0);
+
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "Acción recomendada: {}",
+                                                    finding.action
+                                                ))
+                                                .strong(),
+                                            );
+
+                                            ui.add_space(3.0);
+
+                                            ui.small(format!(
+                                                "Regla: {} · Penalización: -{}",
+                                                finding.code, finding.penalty
+                                            ));
+
+                                            ui.add_space(7.0);
+
+                                            ui.horizontal(|ui| {
+                                                if ui.small_button("Útil").clicked() {
+                                                    feedback_action =
+                                                        Some((finding.code.clone(), true));
+                                                }
+
+                                                if ui.small_button("No útil").clicked() {
+                                                    feedback_action =
+                                                        Some((finding.code.clone(), false));
+                                                }
+
+                                                ui.small(format!(
+                                                    "Útil: {} · No útil: {}",
+                                                    summary.useful, summary.not_useful
+                                                ));
+                                            });
+                                        },
+                                    );
+                                }
+                            });
+                    }
+                });
+
+                if let Some((rule_code, useful)) = feedback_action {
+                    self.save_rule_feedback(&selected_name, &rule_code, useful);
+                }
+
+                ui.add_space(10.0);
+
+                ui.heading("Cambios locales");
+                ui.separator();
+
+                if status.raw_status.trim().is_empty() {
+                    ui.label("No hay cambios locales pendientes.");
+                } else {
+                    egui::ScrollArea::vertical()
+                        .max_height(230.0)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.monospace(&status.raw_status);
+                        });
+                }
+
+                ui.add_space(20.0);
+            });
     }
 
     fn show_add_window(&mut self, context: &egui::Context) {
@@ -796,6 +944,7 @@ impl OpsDeckApp {
         }
 
         let mut open = self.show_add_dialog;
+
         let mut save_clicked = false;
         let mut cancel_clicked = false;
 
@@ -806,9 +955,11 @@ impl OpsDeckApp {
             .default_width(520.0)
             .show(context, |ui| {
                 ui.label("Nombre del proyecto");
+
                 ui.text_edit_singleline(&mut self.new_project_name);
 
                 ui.add_space(8.0);
+
                 ui.label("Carpeta del repositorio");
 
                 ui.horizontal(|ui| {
@@ -832,11 +983,13 @@ impl OpsDeckApp {
                 });
 
                 ui.add_space(8.0);
+
                 ui.label("Health URL opcional");
 
                 ui.text_edit_singleline(&mut self.new_health_url);
 
                 ui.add_space(5.0);
+
                 ui.small("La carpeta debe contener un repositorio Git válido.");
 
                 ui.add_space(12.0);
@@ -895,11 +1048,17 @@ impl OpsDeckApp {
                 ui.add_space(12.0);
 
                 ui.horizontal(|ui| {
-                    if ui.button("Eliminar").clicked() {
+                    if ui
+                        .button("Eliminar")
+                        .clicked()
+                    {
                         confirm_clicked = true;
                     }
 
-                    if ui.button("Cancelar").clicked() {
+                    if ui
+                        .button("Cancelar")
+                        .clicked()
+                    {
                         cancel_clicked = true;
                     }
                 });
@@ -907,6 +1066,7 @@ impl OpsDeckApp {
 
         if confirm_clicked {
             self.delete_project(&project_name);
+
             self.delete_target = None;
         } else if cancel_clicked {
             self.delete_target = None;
@@ -964,6 +1124,7 @@ fn show_health_panel(ui: &mut egui::Ui, health: &HealthCheck) {
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.heading("Health");
+
                 ui.label(egui::RichText::new(health.state.to_string()).strong());
             });
 
@@ -993,29 +1154,37 @@ fn show_health_panel(ui: &mut egui::Ui, health: &HealthCheck) {
             .spacing([28.0, 9.0])
             .show(ui, |ui| {
                 ui.label(egui::RichText::new("URL").strong());
+
                 ui.monospace(health.url.as_deref().unwrap_or("Sin configurar"));
+
                 ui.end_row();
 
                 ui.label(egui::RichText::new("Código HTTP").strong());
+
                 ui.label(
                     health
                         .status_code
                         .map(|code| code.to_string())
                         .unwrap_or_else(|| "No disponible".to_string()),
                 );
+
                 ui.end_row();
 
                 ui.label(egui::RichText::new("Latencia").strong());
+
                 ui.label(
                     health
                         .latency_ms
                         .map(|latency| format!("{latency} ms"))
                         .unwrap_or_else(|| "No disponible".to_string()),
                 );
+
                 ui.end_row();
 
                 ui.label(egui::RichText::new("Content-Type").strong());
+
                 ui.monospace(health.content_type.as_deref().unwrap_or("No disponible"));
+
                 ui.end_row();
 
                 ui.label(egui::RichText::new("JSON válido").strong());
@@ -1056,6 +1225,7 @@ fn status_card(ui: &mut egui::Ui, label: &str, value: usize) {
 
         ui.vertical_centered(|ui| {
             ui.label(egui::RichText::new(value.to_string()).size(24.0).strong());
+
             ui.label(label);
         });
     });
@@ -1063,4 +1233,23 @@ fn status_card(ui: &mut egui::Ui, label: &str, value: usize) {
 
 fn seconds_since(time: &SystemTime) -> u64 {
     time.elapsed().unwrap_or_default().as_secs()
+}
+
+fn load_feedback_map(
+    project_name: &str,
+    diagnosis: Option<&Diagnosis>,
+) -> HashMap<String, FeedbackSummary> {
+    let mut feedback = HashMap::new();
+
+    let Some(diagnosis) = diagnosis else {
+        return feedback;
+    };
+
+    for finding in &diagnosis.findings {
+        let summary = feedback_summary(project_name, &finding.code).unwrap_or_default();
+
+        feedback.insert(finding.code.clone(), summary);
+    }
+
+    feedback
 }
