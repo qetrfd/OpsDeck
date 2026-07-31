@@ -2,6 +2,7 @@ use crate::ProjectStatus;
 use crate::health::HealthCheck;
 use crate::intelligence::Diagnosis;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -99,6 +100,12 @@ pub fn record_review(
     health: &HealthCheck,
     diagnosis: &Diagnosis,
 ) -> Result<ReviewRecord, String> {
+    let project_name = project_name.trim();
+
+    if project_name.is_empty() {
+        return Err("El nombre del proyecto no puede estar vacío".to_string());
+    }
+
     let record = ReviewRecord {
         project_name: project_name.to_string(),
         checked_at: unix_timestamp(),
@@ -106,9 +113,11 @@ pub fn record_review(
         risk: diagnosis.risk.to_string(),
         health_state: health.state.to_string(),
         status_code: health.status_code,
+
         latency_ms: health
             .latency_ms
             .map(|value| u64::try_from(value).unwrap_or(u64::MAX)),
+
         branch: status.branch.clone(),
         changes_total: status.changes.total,
         changes_staged: status.changes.staged,
@@ -116,6 +125,7 @@ pub fn record_review(
         changes_untracked: status.changes.untracked,
         commits_ahead: status.sync.ahead,
         commits_behind: status.sync.behind,
+
         finding_codes: diagnosis
             .findings
             .iter()
@@ -124,9 +134,11 @@ pub fn record_review(
     };
 
     let mut history = load_history()?;
+
     history.reviews.push(record.clone());
 
     trim_reviews(&mut history.reviews);
+
     save_history(&history)?;
 
     Ok(record)
@@ -150,16 +162,18 @@ pub fn record_feedback(
 
     let record = FeedbackRecord {
         project_name: project_name.to_string(),
-        rule_code: rule_code.to_string(),
+        rule_code: rule_code.to_uppercase(),
         useful,
         created_at: unix_timestamp(),
     };
 
     let mut history = load_history()?;
+
     history.feedback.push(record.clone());
 
     if history.feedback.len() > MAX_FEEDBACK_ENTRIES {
         let excess = history.feedback.len() - MAX_FEEDBACK_ENTRIES;
+
         history.feedback.drain(0..excess);
     }
 
@@ -169,6 +183,10 @@ pub fn record_feedback(
 }
 
 pub fn recent_reviews(project_name: &str, limit: usize) -> Result<Vec<ReviewRecord>, String> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
     let history = load_history()?;
 
     let reviews = history
@@ -193,8 +211,35 @@ pub fn feedback_summary(project_name: &str, rule_code: &str) -> Result<FeedbackS
     ))
 }
 
+pub fn feedback_for_project(
+    project_name: &str,
+) -> Result<HashMap<String, FeedbackSummary>, String> {
+    let history = load_history()?;
+
+    let mut summaries = HashMap::<String, FeedbackSummary>::new();
+
+    for feedback in &history.feedback {
+        if !feedback.project_name.eq_ignore_ascii_case(project_name) {
+            continue;
+        }
+
+        let code = feedback.rule_code.to_uppercase();
+
+        let summary = summaries.entry(code).or_default();
+
+        if feedback.useful {
+            summary.useful += 1;
+        } else {
+            summary.not_useful += 1;
+        }
+    }
+
+    Ok(summaries)
+}
+
 pub fn clear_project_history(project_name: &str) -> Result<usize, String> {
     let mut history = load_history()?;
+
     let previous_count = history.reviews.len();
 
     history
@@ -202,6 +247,22 @@ pub fn clear_project_history(project_name: &str) -> Result<usize, String> {
         .retain(|record| !record.project_name.eq_ignore_ascii_case(project_name));
 
     let removed = previous_count - history.reviews.len();
+
+    save_history(&history)?;
+
+    Ok(removed)
+}
+
+pub fn clear_project_feedback(project_name: &str) -> Result<usize, String> {
+    let mut history = load_history()?;
+
+    let previous_count = history.feedback.len();
+
+    history
+        .feedback
+        .retain(|record| !record.project_name.eq_ignore_ascii_case(project_name));
+
+    let removed = previous_count - history.feedback.len();
 
     save_history(&history)?;
 
@@ -318,6 +379,7 @@ mod tests {
             .count();
 
         assert_eq!(demo_count, MAX_REVIEWS_PER_PROJECT);
+
         assert_eq!(other_count, 1);
     }
 
@@ -325,6 +387,7 @@ mod tests {
     fn feedback_summary_counts_both_answers() {
         let history = HistoryStore {
             reviews: Vec::new(),
+
             feedback: vec![
                 FeedbackRecord {
                     project_name: "Demo".to_string(),
@@ -350,6 +413,60 @@ mod tests {
         let summary = feedback_summary_from_store(&history, "demo", "rule_one");
 
         assert_eq!(summary.useful, 2);
+        assert_eq!(summary.not_useful, 1);
+    }
+
+    #[test]
+    fn feedback_for_project_groups_rules() {
+        let history = HistoryStore {
+            reviews: Vec::new(),
+
+            feedback: vec![
+                FeedbackRecord {
+                    project_name: "Demo".to_string(),
+                    rule_code: "RULE_ONE".to_string(),
+                    useful: true,
+                    created_at: 1,
+                },
+                FeedbackRecord {
+                    project_name: "Demo".to_string(),
+                    rule_code: "rule_one".to_string(),
+                    useful: false,
+                    created_at: 2,
+                },
+                FeedbackRecord {
+                    project_name: "Otro".to_string(),
+                    rule_code: "RULE_ONE".to_string(),
+                    useful: true,
+                    created_at: 3,
+                },
+            ],
+        };
+
+        let mut summaries = HashMap::<String, FeedbackSummary>::new();
+
+        for feedback in &history.feedback {
+            if !feedback.project_name.eq_ignore_ascii_case("Demo") {
+                continue;
+            }
+
+            let summary = summaries
+                .entry(feedback.rule_code.to_uppercase())
+                .or_default();
+
+            if feedback.useful {
+                summary.useful += 1;
+            } else {
+                summary.not_useful += 1;
+            }
+        }
+
+        let summary = summaries
+            .get("RULE_ONE")
+            .copied()
+            .expect("Debe existir RULE_ONE");
+
+        assert_eq!(summary.useful, 1);
         assert_eq!(summary.not_useful, 1);
     }
 }

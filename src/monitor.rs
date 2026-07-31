@@ -1,6 +1,7 @@
 use crate::health::{HealthCheck, check_optional_url};
-use crate::history::{ReviewRecord, recent_reviews, record_review};
+use crate::history::{ReviewRecord, feedback_for_project, recent_reviews, record_review};
 use crate::intelligence::{Diagnosis, analyze_project_with_health};
+use crate::learning::apply_feedback;
 use crate::{Project, ProjectStatus, project_status};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread;
@@ -97,7 +98,9 @@ fn run_worker(command_receiver: Receiver<MonitorCommand>, event_sender: Sender<M
                 }
             }
 
-            MonitorCommand::Shutdown => break,
+            MonitorCommand::Shutdown => {
+                break;
+            }
         }
     }
 }
@@ -119,35 +122,7 @@ fn inspect_project(project: Project, event_sender: &Sender<MonitorEvent>) -> boo
     let health = check_optional_url(project.health_url.as_deref());
 
     let result = match project_status(&target) {
-        Ok(status) => {
-            let diagnosis = analyze_project_with_health(&status, &health);
-
-            let mut history_error =
-                record_review(&project_name, &status, &health, &diagnosis).err();
-
-            let history = match recent_reviews(&project_name, HISTORY_LIMIT) {
-                Ok(records) => records,
-
-                Err(error) => {
-                    if history_error.is_none() {
-                        history_error = Some(error);
-                    }
-
-                    Vec::new()
-                }
-            };
-
-            MonitorResult {
-                project_name,
-                status: Some(status),
-                health,
-                diagnosis: Some(diagnosis),
-                history,
-                error: None,
-                history_error,
-                checked_at: SystemTime::now(),
-            }
-        }
+        Ok(status) => inspect_valid_project(project_name, status, health),
 
         Err(error) => MonitorResult {
             project_name,
@@ -164,4 +139,54 @@ fn inspect_project(project: Project, event_sender: &Sender<MonitorEvent>) -> boo
     event_sender
         .send(MonitorEvent::Finished(Box::new(result)))
         .is_ok()
+}
+
+fn inspect_valid_project(
+    project_name: String,
+    status: ProjectStatus,
+    health: HealthCheck,
+) -> MonitorResult {
+    let mut history_error = None;
+
+    let feedback = match feedback_for_project(&project_name) {
+        Ok(feedback) => feedback,
+
+        Err(error) => {
+            history_error = Some(error);
+            Default::default()
+        }
+    };
+
+    let base_diagnosis = analyze_project_with_health(&status, &health);
+
+    let diagnosis = apply_feedback(&status, base_diagnosis, &feedback);
+
+    if let Err(error) = record_review(&project_name, &status, &health, &diagnosis) {
+        if history_error.is_none() {
+            history_error = Some(error);
+        }
+    }
+
+    let history = match recent_reviews(&project_name, HISTORY_LIMIT) {
+        Ok(records) => records,
+
+        Err(error) => {
+            if history_error.is_none() {
+                history_error = Some(error);
+            }
+
+            Vec::new()
+        }
+    };
+
+    MonitorResult {
+        project_name,
+        status: Some(status),
+        health,
+        diagnosis: Some(diagnosis),
+        history,
+        error: None,
+        history_error,
+        checked_at: SystemTime::now(),
+    }
 }

@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand};
 use opsdeck::health::{HealthCheck, check_optional_url};
+use opsdeck::history::feedback_for_project;
 use opsdeck::intelligence::{Diagnosis, analyze_project_with_health};
+use opsdeck::learning::apply_feedback;
 use opsdeck::{
     ProjectStatus, add_project, config_path, load_config, open_in_file_manager, open_in_vscode,
     project_status, resolve_project_target,
@@ -77,7 +79,11 @@ fn run() -> Result<(), String> {
 
             let health = check_optional_url(status.health_url.as_deref());
 
-            let diagnosis = analyze_project_with_health(&status, &health);
+            let feedback = feedback_for_project(&status.name)?;
+
+            let base_diagnosis = analyze_project_with_health(&status, &health);
+
+            let diagnosis = apply_feedback(&status, base_diagnosis, &feedback);
 
             print_diagnosis(&diagnosis);
             Ok(())
@@ -217,22 +223,32 @@ fn print_status(status: &ProjectStatus) {
     );
 
     println!("Rama:                  {}", status.branch);
+
     println!("Archivos con cambios:  {}", status.changes.total);
+
     println!("Preparados:            {}", status.changes.staged);
+
     println!("Sin preparar:          {}", status.changes.unstaged);
+
     println!("Archivos nuevos:       {}", status.changes.untracked);
+
     println!("Último commit:         {}", status.last_commit);
     println!("Remoto:                {}", status.remote);
 
     match &status.sync.upstream {
         Some(upstream) => {
             println!("Seguimiento:           {upstream}");
+
             println!("Commits por subir:     {}", status.sync.ahead);
+
             println!("Commits por descargar: {}", status.sync.behind);
         }
+
         None => {
             println!("Seguimiento:           sin upstream");
+
             println!("Commits por subir:     no disponible");
+
             println!("Commits por descargar: no disponible");
         }
     }
@@ -241,18 +257,22 @@ fn print_status(status: &ProjectStatus) {
         Some(url) => {
             println!("Health:                {url}");
         }
+
         None => {
             println!("Health:                sin endpoint");
         }
     }
 
     println!("──────────────────────────────────────────────────");
+
     println!("Estado: {}", status.state_label());
 
     if !status.raw_status.trim().is_empty() {
         println!();
         println!("CAMBIOS");
+
         println!("──────────────────────────────────────────────────");
+
         println!("{}", status.raw_status);
     }
 
@@ -262,7 +282,9 @@ fn print_status(status: &ProjectStatus) {
 fn print_health(project_name: &str, health: &HealthCheck) {
     println!();
     println!("OPSDECK HEALTH CHECK");
+
     println!("──────────────────────────────────────────────────");
+
     println!("Proyecto:       {project_name}");
     println!("Estado:         {}", health.state);
 
@@ -270,6 +292,7 @@ fn print_health(project_name: &str, health: &HealthCheck) {
         Some(url) => {
             println!("URL:            {url}");
         }
+
         None => {
             println!("URL:            sin configurar");
         }
@@ -279,6 +302,7 @@ fn print_health(project_name: &str, health: &HealthCheck) {
         Some(code) => {
             println!("Código HTTP:    {code}");
         }
+
         None => {
             println!("Código HTTP:    no disponible");
         }
@@ -288,6 +312,7 @@ fn print_health(project_name: &str, health: &HealthCheck) {
         Some(latency) => {
             println!("Latencia:       {latency} ms");
         }
+
         None => {
             println!("Latencia:       no disponible");
         }
@@ -297,6 +322,7 @@ fn print_health(project_name: &str, health: &HealthCheck) {
         Some(content_type) => {
             println!("Content-Type:   {content_type}");
         }
+
         None => {
             println!("Content-Type:   no disponible");
         }
@@ -306,9 +332,11 @@ fn print_health(project_name: &str, health: &HealthCheck) {
         Some(true) => {
             println!("JSON válido:    sí");
         }
+
         Some(false) => {
             println!("JSON válido:    no");
         }
+
         None => {
             println!("JSON válido:    no aplica");
         }
@@ -323,7 +351,9 @@ fn print_health(project_name: &str, health: &HealthCheck) {
     if let Some(preview) = &health.body_preview {
         println!();
         println!("RESPUESTA");
+
         println!("──────────────────────────────────────────────────");
+
         println!("{preview}");
     }
 
@@ -333,11 +363,14 @@ fn print_health(project_name: &str, health: &HealthCheck) {
 fn print_diagnosis(diagnosis: &Diagnosis) {
     println!();
     println!("OPSDECK INTELLIGENCE");
+
     println!("──────────────────────────────────────────────────");
+
     println!("Puntuación: {}/100", diagnosis.score);
     println!("Nivel:      {}", diagnosis.risk);
     println!();
     println!("{}", diagnosis.summary);
+
     println!("──────────────────────────────────────────────────");
 
     if diagnosis.findings.is_empty() {
@@ -354,9 +387,12 @@ fn print_diagnosis(diagnosis: &Diagnosis) {
             );
 
             println!("   Código: {}", finding.code);
+
             println!("   Análisis: {}", finding.explanation);
+
             println!("   Acción: {}", finding.action);
-            println!("   Penalización: -{}", finding.penalty);
+
+            println!("   Penalización adaptada: -{}", finding.penalty);
         }
     }
 
