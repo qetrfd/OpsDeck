@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use opsdeck::anomaly::detect_anomalies;
+use opsdeck::checklist::{DeployChecklist, evaluate_deploy_checklist};
 use opsdeck::health::{HealthCheck, check_optional_url};
 use opsdeck::history::{feedback_for_project, recent_reviews, record_review};
 use opsdeck::intelligence::{Diagnosis, analyze_project_with_health};
@@ -37,6 +38,11 @@ enum Commands {
     },
 
     Health {
+        #[arg(default_value = ".", value_name = "PROYECTO_O_RUTA")]
+        target: String,
+    },
+
+    Checklist {
         #[arg(default_value = ".", value_name = "PROYECTO_O_RUTA")]
         target: String,
     },
@@ -85,16 +91,13 @@ fn run() -> Result<(), String> {
     match cli.command {
         Some(Commands::Status { target }) => {
             let status = project_status(&target)?;
-
             print_status(&status);
             Ok(())
         }
 
         Some(Commands::Diagnose { target }) => {
             let status = project_status(&target)?;
-
             let health = check_optional_url(status.health_url.as_deref());
-
             let feedback = feedback_for_project(&status.name)?;
 
             let base_diagnosis = analyze_project_with_health(&status, &health);
@@ -114,11 +117,9 @@ fn run() -> Result<(), String> {
             Ok(())
         }
 
-        Some(Commands::Report { target, output }) => {
+        Some(Commands::Checklist { target }) => {
             let status = project_status(&target)?;
-
             let health = check_optional_url(status.health_url.as_deref());
-
             let feedback = feedback_for_project(&status.name)?;
 
             let base_diagnosis = analyze_project_with_health(&status, &health);
@@ -128,8 +129,31 @@ fn run() -> Result<(), String> {
             record_review(&status.name, &status, &health, &diagnosis)?;
 
             let history = recent_reviews(&status.name, 30)?;
-
             let anomaly_report = detect_anomalies(&history);
+
+            let checklist =
+                evaluate_deploy_checklist(&status, &health, &diagnosis, &anomaly_report);
+
+            print_checklist(&status.name, &checklist);
+            Ok(())
+        }
+
+        Some(Commands::Report { target, output }) => {
+            let status = project_status(&target)?;
+            let health = check_optional_url(status.health_url.as_deref());
+            let feedback = feedback_for_project(&status.name)?;
+
+            let base_diagnosis = analyze_project_with_health(&status, &health);
+
+            let diagnosis = apply_feedback(&status, base_diagnosis, &feedback);
+
+            record_review(&status.name, &status, &health, &diagnosis)?;
+
+            let history = recent_reviews(&status.name, 30)?;
+            let anomaly_report = detect_anomalies(&history);
+
+            let checklist =
+                evaluate_deploy_checklist(&status, &health, &diagnosis, &anomaly_report);
 
             let path = export_deploy_report(
                 &status.name,
@@ -149,11 +173,20 @@ fn run() -> Result<(), String> {
 
             println!(
                 "Decisión: {}",
-                if anomaly_report.deploy_ready {
-                    "Aprobado"
+                if checklist.ready {
+                    if checklist.warnings > 0 {
+                        "Permitido con advertencias"
+                    } else {
+                        "Aprobado"
+                    }
                 } else {
-                    "No recomendado"
+                    "Bloqueado"
                 }
+            );
+
+            println!(
+                "Aprobados: {} · Advertencias: {} · Bloqueados: {}",
+                checklist.passed, checklist.warnings, checklist.failed
             );
 
             println!("────────────────────────────────────────");
@@ -176,13 +209,8 @@ fn run() -> Result<(), String> {
             println!("Ruta:   {}", project.path.display());
 
             match project.health_url {
-                Some(url) => {
-                    println!("Health: {url}");
-                }
-
-                None => {
-                    println!("Health: sin endpoint");
-                }
+                Some(url) => println!("Health: {url}"),
+                None => println!("Health: sin endpoint"),
             }
 
             println!("────────────────────────────────────────");
@@ -231,6 +259,8 @@ fn print_home() {
     println!("  opsdeck diagnose <ruta>");
     println!("  opsdeck health <nombre>");
     println!("  opsdeck health <ruta>");
+    println!("  opsdeck checklist <nombre>");
+    println!("  opsdeck checklist <ruta>");
     println!("  opsdeck report <nombre>");
     println!("  opsdeck report <nombre> --output <archivo.md>");
     println!("  opsdeck open <nombre>");
@@ -260,13 +290,8 @@ fn print_projects() -> Result<(), String> {
             println!("   Ruta: {}", project.path.display());
 
             match &project.health_url {
-                Some(url) => {
-                    println!("   Health: {url}");
-                }
-
-                None => {
-                    println!("   Health: sin endpoint");
-                }
+                Some(url) => println!("   Health: {url}"),
+                None => println!("   Health: sin endpoint"),
             }
 
             if index + 1 < config.projects.len() {
@@ -295,57 +320,39 @@ fn print_status(status: &ProjectStatus) {
     );
 
     println!("Rama:                  {}", status.branch);
-
     println!("Archivos con cambios:  {}", status.changes.total);
-
     println!("Preparados:            {}", status.changes.staged);
-
     println!("Sin preparar:          {}", status.changes.unstaged);
-
     println!("Archivos nuevos:       {}", status.changes.untracked);
-
     println!("Último commit:         {}", status.last_commit);
-
     println!("Remoto:                {}", status.remote);
 
     match &status.sync.upstream {
         Some(upstream) => {
             println!("Seguimiento:           {upstream}");
-
             println!("Commits por subir:     {}", status.sync.ahead);
-
             println!("Commits por descargar: {}", status.sync.behind);
         }
 
         None => {
             println!("Seguimiento:           sin upstream");
-
             println!("Commits por subir:     no disponible");
-
             println!("Commits por descargar: no disponible");
         }
     }
 
     match &status.health_url {
-        Some(url) => {
-            println!("Health:                {url}");
-        }
-
-        None => {
-            println!("Health:                sin endpoint");
-        }
+        Some(url) => println!("Health:                {url}"),
+        None => println!("Health:                sin endpoint"),
     }
 
     println!("──────────────────────────────────────────────────");
-
     println!("Estado: {}", status.state_label());
 
     if !status.raw_status.trim().is_empty() {
         println!();
         println!("CAMBIOS");
-
         println!("──────────────────────────────────────────────────");
-
         println!("{}", status.raw_status);
     }
 
@@ -355,64 +362,38 @@ fn print_status(status: &ProjectStatus) {
 fn print_health(project_name: &str, health: &HealthCheck) {
     println!();
     println!("OPSDECK HEALTH CHECK");
-
     println!("──────────────────────────────────────────────────");
-
     println!("Proyecto:       {project_name}");
     println!("Estado:         {}", health.state);
 
     match &health.url {
-        Some(url) => {
-            println!("URL:            {url}");
-        }
-
-        None => {
-            println!("URL:            sin configurar");
-        }
+        Some(url) => println!("URL:            {url}"),
+        None => println!("URL:            sin configurar"),
     }
 
     match health.status_code {
-        Some(code) => {
-            println!("Código HTTP:    {code}");
-        }
-
-        None => {
-            println!("Código HTTP:    no disponible");
-        }
+        Some(code) => println!("Código HTTP:    {code}"),
+        None => println!("Código HTTP:    no disponible"),
     }
 
     match health.latency_ms {
-        Some(latency) => {
-            println!("Latencia:       {latency} ms");
-        }
-
-        None => {
-            println!("Latencia:       no disponible");
-        }
+        Some(latency) => println!("Latencia:       {latency} ms"),
+        None => println!("Latencia:       no disponible"),
     }
 
     match &health.content_type {
         Some(content_type) => {
             println!("Content-Type:   {content_type}");
         }
-
         None => {
             println!("Content-Type:   no disponible");
         }
     }
 
     match health.json_valid {
-        Some(true) => {
-            println!("JSON válido:    sí");
-        }
-
-        Some(false) => {
-            println!("JSON válido:    no");
-        }
-
-        None => {
-            println!("JSON válido:    no aplica");
-        }
+        Some(true) => println!("JSON válido:    sí"),
+        Some(false) => println!("JSON válido:    no"),
+        None => println!("JSON válido:    no aplica"),
     }
 
     println!("──────────────────────────────────────────────────");
@@ -424,9 +405,7 @@ fn print_health(project_name: &str, health: &HealthCheck) {
     if let Some(preview) = &health.body_preview {
         println!();
         println!("RESPUESTA");
-
         println!("──────────────────────────────────────────────────");
-
         println!("{preview}");
     }
 
@@ -436,15 +415,11 @@ fn print_health(project_name: &str, health: &HealthCheck) {
 fn print_diagnosis(diagnosis: &Diagnosis) {
     println!();
     println!("OPSDECK INTELLIGENCE");
-
     println!("──────────────────────────────────────────────────");
-
     println!("Puntuación: {}/100", diagnosis.score);
-
     println!("Nivel:      {}", diagnosis.risk);
     println!();
     println!("{}", diagnosis.summary);
-
     println!("──────────────────────────────────────────────────");
 
     if diagnosis.findings.is_empty() {
@@ -461,13 +436,51 @@ fn print_diagnosis(diagnosis: &Diagnosis) {
             );
 
             println!("   Código: {}", finding.code);
-
             println!("   Análisis: {}", finding.explanation);
-
             println!("   Acción: {}", finding.action);
 
             println!("   Penalización adaptada: -{}", finding.penalty);
         }
+    }
+
+    println!();
+}
+
+fn print_checklist(project_name: &str, checklist: &DeployChecklist) {
+    println!();
+    println!("OPSDECK PRE-DEPLOY CHECKLIST");
+    println!("──────────────────────────────────────────────────");
+    println!("Proyecto: {project_name}");
+
+    println!(
+        "Decisión: {}",
+        if checklist.ready {
+            if checklist.warnings > 0 {
+                "Deploy permitido con advertencias"
+            } else {
+                "Deploy aprobado"
+            }
+        } else {
+            "Deploy bloqueado"
+        }
+    );
+
+    println!(
+        "Aprobados: {} · Advertencias: {} · Bloqueados: {}",
+        checklist.passed, checklist.warnings, checklist.failed
+    );
+
+    println!();
+    println!("{}", checklist.summary);
+    println!("──────────────────────────────────────────────────");
+
+    for (index, item) in checklist.items.iter().enumerate() {
+        println!();
+
+        println!("{}. [{}] {}", index + 1, item.state, item.title);
+
+        println!("   Código: {}", item.code);
+        println!("   Detalle: {}", item.detail);
     }
 
     println!();
