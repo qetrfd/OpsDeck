@@ -1,5 +1,6 @@
 use crate::anomaly::{AnomalyReport, detect_anomalies};
 use crate::checklist::{DeployChecklist, evaluate_deploy_checklist};
+use crate::gate::{DeployGate, evaluate_deploy_gate};
 use crate::health::{HealthCheck, check_optional_url};
 use crate::history::{ReviewRecord, feedback_for_project, recent_reviews, record_review};
 use crate::intelligence::{Diagnosis, analyze_project_with_health};
@@ -21,6 +22,7 @@ pub enum MonitorCommand {
 #[derive(Debug, Clone)]
 pub enum MonitorEvent {
     Started { project_name: String },
+
     Finished(Box<MonitorResult>),
 }
 
@@ -33,6 +35,7 @@ pub struct MonitorResult {
     pub history: Vec<ReviewRecord>,
     pub anomaly_report: AnomalyReport,
     pub checklist: DeployChecklist,
+    pub gate: DeployGate,
     pub error: Option<String>,
     pub history_error: Option<String>,
     pub checked_at: SystemTime,
@@ -120,6 +123,7 @@ fn inspect_project(project: Project, event_sender: &Sender<MonitorEvent>) -> boo
     }
 
     let project_name = project.name.clone();
+
     let target = project.path.to_string_lossy().to_string();
 
     let health = check_optional_url(project.health_url.as_deref());
@@ -127,18 +131,27 @@ fn inspect_project(project: Project, event_sender: &Sender<MonitorEvent>) -> boo
     let result = match project_status(&target) {
         Ok(status) => inspect_valid_project(project_name, status, health),
 
-        Err(error) => MonitorResult {
-            project_name,
-            status: None,
-            health,
-            diagnosis: None,
-            history: Vec::new(),
-            anomaly_report: unavailable_anomaly_report(),
-            checklist: DeployChecklist::unavailable("El repositorio no pudo analizarse."),
-            error: Some(error),
-            history_error: None,
-            checked_at: SystemTime::now(),
-        },
+        Err(error) => {
+            let gate =
+                DeployGate::unavailable(project_name.clone(), "El repositorio no pudo analizarse.");
+
+            MonitorResult {
+                project_name,
+                status: None,
+                health,
+                diagnosis: None,
+                history: Vec::new(),
+
+                anomaly_report: unavailable_anomaly_report(),
+
+                checklist: DeployChecklist::unavailable("El repositorio no pudo analizarse."),
+
+                gate,
+                error: Some(error),
+                history_error: None,
+                checked_at: SystemTime::now(),
+            }
+        }
     };
 
     event_sender
@@ -158,6 +171,7 @@ fn inspect_valid_project(
 
         Err(error) => {
             history_error = Some(error);
+
             Default::default()
         }
     };
@@ -166,10 +180,10 @@ fn inspect_valid_project(
 
     let diagnosis = apply_feedback(&status, base_diagnosis, &feedback);
 
-    if let Err(error) = record_review(&project_name, &status, &health, &diagnosis) {
-        if history_error.is_none() {
-            history_error = Some(error);
-        }
+    if let Err(error) = record_review(&project_name, &status, &health, &diagnosis)
+        && history_error.is_none()
+    {
+        history_error = Some(error);
     }
 
     let history = match recent_reviews(&project_name, HISTORY_LIMIT) {
@@ -188,6 +202,16 @@ fn inspect_valid_project(
 
     let checklist = evaluate_deploy_checklist(&status, &health, &diagnosis, &anomaly_report);
 
+    let gate = evaluate_deploy_gate(
+        &project_name,
+        &status,
+        &health,
+        &diagnosis,
+        &anomaly_report,
+        &checklist,
+        false,
+    );
+
     MonitorResult {
         project_name,
         status: Some(status),
@@ -196,6 +220,7 @@ fn inspect_valid_project(
         history,
         anomaly_report,
         checklist,
+        gate,
         error: None,
         history_error,
         checked_at: SystemTime::now(),
@@ -206,6 +231,7 @@ fn unavailable_anomaly_report() -> AnomalyReport {
     AnomalyReport {
         anomalies: Vec::new(),
         deploy_ready: false,
+
         summary: "No fue posible determinar si el proyecto está listo para deploy.".to_string(),
     }
 }
