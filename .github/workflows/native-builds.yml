@@ -1,0 +1,150 @@
+name: Native builds
+
+on:
+  workflow_dispatch:
+
+  push:
+    branches:
+      - main
+
+    tags:
+      - "v*"
+
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate:
+    name: Validate Rust project
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            ca-certificates \
+            git \
+            libclang-dev \
+            libgtk-3-dev \
+            libssl-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            pkg-config
+
+      - name: Configure stable Rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add rustfmt clippy
+
+      - name: Verify formatting
+        run: cargo fmt --check
+
+      - name: Check all targets
+        run: cargo check --locked --all-targets
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked --all-targets
+
+  linux:
+    name: Build Linux packages
+    needs: validate
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            ca-certificates \
+            dpkg-dev \
+            git \
+            libclang-dev \
+            libgtk-3-dev \
+            libssl-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            pkg-config
+
+      - name: Configure stable Rust
+        run: |
+          rustup update stable
+          rustup default stable
+
+      - name: Grant script permissions
+        run: |
+          chmod +x scripts/package-linux.sh
+          chmod +x packaging/linux/install.sh
+          chmod +x packaging/linux/uninstall.sh
+
+      - name: Build Linux packages
+        run: ./scripts/package-linux.sh
+
+      - name: Show generated files
+        run: ls -lh dist-native
+
+      - name: Upload Linux packages
+        uses: actions/upload-artifact@v6
+        with:
+          name: OpsDeck-Linux
+          path: |
+            dist-native/*.deb
+            dist-native/*.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+  windows:
+    name: Build Windows package
+    needs: validate
+    runs-on: windows-2025
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Configure stable Rust
+        shell: pwsh
+        run: |
+          rustup update stable
+          rustup default stable
+
+      - name: Build Windows package
+        shell: pwsh
+        run: |
+          .\scripts\package-windows.ps1
+
+      - name: Show generated files
+        shell: pwsh
+        run: |
+          Get-ChildItem .\dist-native
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v6
+        with:
+          name: OpsDeck-Windows
+          path: dist-native/*.zip
+          if-no-files-found: error
+          retention-days: 30

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=OpsDeck
+GenericName=Project Operations Dashboard
+Comment=Supervisa proyectos y evalúa si están listos para deploy
+Exec=opsdeck-desktop
+TryExec=opsdeck-desktop
+Icon=utilities-terminal
+Terminal=false
+Type=Application
+Categories=Development;Utility;
+StartupNotify=true
+Keywords=Git;Deploy;Development;Monitoring;
