@@ -1,0 +1,39 @@
+name: opsdeck
+
+services:
+  cli:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+
+    image: opsdeck:1.0.0
+
+    environment:
+      HOME: /data
+      OPSDECK_CONTAINER: "1"
+
+    working_dir: /workspace
+
+    volumes:
+      - type: bind
+        source: "${OPSDECK_PROJECT_PATH:-.}"
+        target: /workspace
+
+      - type: volume
+        source: opsdeck-data
+        target: /data/.opsdeck
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    entrypoint:
+      - /usr/local/bin/opsdeck-entrypoint
+
+    command:
+      - status
+      - /workspace
+
+volumes:
+  opsdeck-data:
+    name: opsdeck-data
