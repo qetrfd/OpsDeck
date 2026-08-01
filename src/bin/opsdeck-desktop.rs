@@ -1,6 +1,10 @@
 use eframe::egui;
 use opsdeck::anomaly::AnomalyReport;
 use opsdeck::checklist::{CheckState, DeployChecklist};
+use opsdeck::gate::{
+    DeployGate, DeployPolicy, PolicyPreset, export_gate_manifest, load_policy, reset_policy,
+    save_policy, suggested_gate_filename,
+};
 use opsdeck::health::{HealthCheck, HealthState};
 use opsdeck::history::{FeedbackSummary, ReviewRecord, feedback_summary, record_feedback};
 use opsdeck::history_ui::show_history_panel;
@@ -21,8 +25,8 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("OpsDeck")
-            .with_inner_size([1220.0, 790.0])
-            .with_min_inner_size([920.0, 620.0]),
+            .with_inner_size([1280.0, 820.0])
+            .with_min_inner_size([960.0, 640.0]),
         ..Default::default()
     };
 
@@ -41,6 +45,7 @@ struct ProjectSnapshot {
     history: Vec<ReviewRecord>,
     anomaly_report: AnomalyReport,
     checklist: DeployChecklist,
+    gate: DeployGate,
     feedback: HashMap<String, FeedbackSummary>,
     error: Option<String>,
     history_error: Option<String>,
@@ -58,11 +63,39 @@ impl From<MonitorResult> for ProjectSnapshot {
             history: result.history,
             anomaly_report: result.anomaly_report,
             checklist: result.checklist,
+            gate: result.gate,
             feedback,
             error: result.error,
             history_error: result.history_error,
             checked_at: result.checked_at,
         }
+    }
+}
+
+#[derive(Clone)]
+struct PolicyEditorState {
+    project_name: String,
+    policy: DeployPolicy,
+    max_latency_enabled: bool,
+    max_latency_ms: u64,
+}
+
+impl PolicyEditorState {
+    fn new(project_name: String, policy: DeployPolicy) -> Self {
+        Self {
+            project_name,
+            max_latency_enabled: policy.max_latency_ms.is_some(),
+            max_latency_ms: policy.max_latency_ms.unwrap_or(1_000),
+            policy,
+        }
+    }
+
+    fn policy_to_save(&self) -> DeployPolicy {
+        let mut policy = self.policy.clone();
+        policy.max_latency_ms = self
+            .max_latency_enabled
+            .then_some(self.max_latency_ms.max(1));
+        policy
     }
 }
 
@@ -77,6 +110,7 @@ struct OpsDeckApp {
     new_project_path: String,
     new_health_url: String,
     delete_target: Option<String>,
+    policy_editor: Option<PolicyEditorState>,
     auto_refresh: bool,
     refresh_interval_secs: u64,
     last_check_request: Instant,
@@ -99,6 +133,7 @@ impl OpsDeckApp {
             new_project_path: String::new(),
             new_health_url: String::new(),
             delete_target: None,
+            policy_editor: None,
             auto_refresh: true,
             refresh_interval_secs: 60,
             last_check_request: Instant::now(),
@@ -107,13 +142,8 @@ impl OpsDeckApp {
         };
 
         match monitor_result {
-            Ok(monitor) => {
-                app.monitor = Some(monitor);
-            }
-
-            Err(error) => {
-                app.notice = Some(error);
-            }
+            Ok(monitor) => app.monitor = Some(monitor),
+            Err(error) => app.notice = Some(error),
         }
 
         app.reload_projects();
@@ -177,20 +207,15 @@ impl OpsDeckApp {
             .map(|project| project.name.clone())
             .collect::<Vec<_>>();
 
-        for name in &names {
-            self.checking_projects.insert(name.clone());
-        }
+        self.checking_projects.extend(names.iter().cloned());
 
         let result = match &self.monitor {
             Some(monitor) => monitor.check_all(projects),
-
             None => Err("El monitor en segundo plano no está disponible".to_string()),
         };
 
         match result {
-            Ok(()) => {
-                self.last_check_request = Instant::now();
-            }
+            Ok(()) => self.last_check_request = Instant::now(),
 
             Err(error) => {
                 for name in names {
@@ -222,18 +247,14 @@ impl OpsDeckApp {
 
         let result = match &self.monitor {
             Some(monitor) => monitor.check_project(project.clone()),
-
             None => Err("El monitor en segundo plano no está disponible".to_string()),
         };
 
         match result {
-            Ok(()) => {
-                self.last_check_request = Instant::now();
-            }
+            Ok(()) => self.last_check_request = Instant::now(),
 
             Err(error) => {
                 self.checking_projects.remove(&project.name);
-
                 self.notice = Some(error);
             }
         }
@@ -247,7 +268,6 @@ impl OpsDeckApp {
             loop {
                 match monitor.try_recv() {
                     Ok(event) => events.push(event),
-
                     Err(TryRecvError::Empty) => break,
 
                     Err(TryRecvError::Disconnected) => {
@@ -261,7 +281,6 @@ impl OpsDeckApp {
         if disconnected {
             self.monitor = None;
             self.checking_projects.clear();
-
             self.notice = Some("El worker de monitoreo se desconectó".to_string());
         }
 
@@ -281,7 +300,6 @@ impl OpsDeckApp {
                 let project_name = result.project_name.clone();
 
                 self.checking_projects.remove(&project_name);
-
                 self.last_result_received = Some(Instant::now());
 
                 let project_exists = self
@@ -304,9 +322,7 @@ impl OpsDeckApp {
 
     fn save_new_project(&mut self) {
         let name = self.new_project_name.trim().to_string();
-
         let path = self.new_project_path.trim().to_string();
-
         let health_url = self.new_health_url.trim().to_string();
 
         if name.is_empty() {
@@ -319,11 +335,7 @@ impl OpsDeckApp {
             return;
         }
 
-        let health_url = if health_url.is_empty() {
-            None
-        } else {
-            Some(health_url)
-        };
+        let health_url = (!health_url.is_empty()).then_some(health_url);
 
         match add_project(name, PathBuf::from(path), health_url) {
             Ok(project) => {
@@ -342,9 +354,7 @@ impl OpsDeckApp {
                 ));
             }
 
-            Err(error) => {
-                self.notice = Some(error);
-            }
+            Err(error) => self.notice = Some(error),
         }
     }
 
@@ -361,8 +371,7 @@ impl OpsDeckApp {
                 return Err(format!("No se encontró el proyecto {name}"));
             }
 
-            save_config(&config)?;
-            Ok(())
+            save_config(&config)
         })();
 
         match result {
@@ -383,9 +392,7 @@ impl OpsDeckApp {
                 self.notice = Some(format!("El proyecto {name} fue eliminado de OpsDeck"));
             }
 
-            Err(error) => {
-                self.notice = Some(error);
-            }
+            Err(error) => self.notice = Some(error),
         }
     }
 
@@ -411,9 +418,7 @@ impl OpsDeckApp {
                 self.request_project_check(project_name);
             }
 
-            Err(error) => {
-                self.notice = Some(error);
-            }
+            Err(error) => self.notice = Some(error),
         }
     }
 
@@ -452,9 +457,38 @@ impl OpsDeckApp {
                 self.notice = Some(format!("Informe guardado en {}", path.display()));
             }
 
-            Err(error) => {
-                self.notice = Some(error);
+            Err(error) => self.notice = Some(error),
+        }
+    }
+
+    fn export_selected_gate(&mut self, project_name: &str, snapshot: &ProjectSnapshot) {
+        let filename = suggested_gate_filename(project_name);
+
+        let Some(path) = FileDialog::new()
+            .set_title("Guardar manifiesto del deploy gate")
+            .set_file_name(&filename)
+            .add_filter("JSON", &["json"])
+            .save_file()
+        else {
+            return;
+        };
+
+        match export_gate_manifest(&snapshot.gate, Some(path.as_path())) {
+            Ok(path) => {
+                self.notice = Some(format!("Manifiesto guardado en {}", path.display()));
             }
+
+            Err(error) => self.notice = Some(error),
+        }
+    }
+
+    fn open_policy_editor(&mut self, project_name: &str) {
+        match load_policy(project_name) {
+            Ok(policy) => {
+                self.policy_editor = Some(PolicyEditorState::new(project_name.to_string(), policy));
+            }
+
+            Err(error) => self.notice = Some(error),
         }
     }
 
@@ -464,9 +498,7 @@ impl OpsDeckApp {
                 self.notice = Some(format!("{} se abrió en Visual Studio Code", status.name));
             }
 
-            Err(error) => {
-                self.notice = Some(error);
-            }
+            Err(error) => self.notice = Some(error),
         }
     }
 
@@ -476,9 +508,7 @@ impl OpsDeckApp {
                 self.notice = Some(format!("Carpeta abierta: {}", status.path.display()));
             }
 
-            Err(error) => {
-                self.notice = Some(error);
-            }
+            Err(error) => self.notice = Some(error),
         }
     }
 
@@ -499,7 +529,6 @@ impl OpsDeckApp {
 
                 if ui.button("Recargar configuración").clicked() {
                     self.reload_projects();
-
                     self.notice = Some("Configuración recargada".to_string());
                 }
 
@@ -578,9 +607,11 @@ impl OpsDeckApp {
         }
 
         let projects = self.projects.clone();
+
         let mut selected_project = None;
         let mut project_to_delete = None;
         let mut project_to_check = None;
+        let mut project_policy = None;
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -624,7 +655,7 @@ impl OpsDeckApp {
                                 ui.spinner();
                                 ui.label("Revisando...");
                             });
-                        } else if let Some(snapshot) = snapshot {
+                        } else if let Some(snapshot) = snapshot.as_ref() {
                             if let Some(diagnosis) = snapshot.diagnosis.as_ref() {
                                 ui.label(format!("{} · {}/100", diagnosis.risk, diagnosis.score));
                             } else if snapshot.error.is_some() {
@@ -635,24 +666,22 @@ impl OpsDeckApp {
 
                             ui.small(format!("Health: {}", snapshot.health.state));
 
-                            ui.small(format!("Historial: {} registros", snapshot.history.len()));
+                            ui.small(format!("Gate: {}", snapshot.gate.decision));
 
-                            ui.small(if snapshot.checklist.ready {
-                                if snapshot.checklist.warnings > 0 {
-                                    "Deploy: permitido con advertencias"
-                                } else {
-                                    "Deploy: aprobado"
-                                }
-                            } else {
-                                "Deploy: bloqueado"
-                            });
+                            ui.small(format!("Política: {}", snapshot.gate.policy.preset.label()));
                         } else {
                             ui.label("Sin revisar");
                         }
 
-                        if ui.small_button("Revisar ahora").clicked() {
-                            project_to_check = Some(project.name.clone());
-                        }
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Revisar ahora").clicked() {
+                                project_to_check = Some(project.name.clone());
+                            }
+
+                            if ui.small_button("Política").clicked() {
+                                project_policy = Some(project.name.clone());
+                            }
+                        });
                     });
 
                     ui.add_space(7.0);
@@ -669,6 +698,10 @@ impl OpsDeckApp {
 
         if let Some(name) = project_to_check {
             self.request_project_check(&name);
+        }
+
+        if let Some(name) = project_policy {
+            self.open_policy_editor(&name);
         }
 
         ui.separator();
@@ -773,13 +806,21 @@ impl OpsDeckApp {
 
                         ui.small(format!(
                             "Última revisión: hace {} s",
-                            seconds_since(&snapshot.checked_at,)
+                            seconds_since(&snapshot.checked_at)
                         ));
                     });
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Exportar gate").clicked() {
+                            self.export_selected_gate(&selected_name, &snapshot);
+                        }
+
                         if ui.button("Exportar informe").clicked() {
                             self.export_selected_report(&selected_name, &snapshot);
+                        }
+
+                        if ui.button("Editar política").clicked() {
+                            self.open_policy_editor(&selected_name);
                         }
 
                         if ui.button("Abrir carpeta").clicked() {
@@ -804,67 +845,38 @@ impl OpsDeckApp {
                 });
 
                 ui.add_space(10.0);
-
-                ui.group(|ui| {
-                    ui.heading(status.state_label());
-                    ui.add_space(8.0);
-
-                    egui::Grid::new("repository_information")
-                        .num_columns(2)
-                        .spacing([28.0, 10.0])
-                        .show(ui, |ui| {
-                            ui.label(egui::RichText::new("Rama").strong());
-                            ui.monospace(&status.branch);
-                            ui.end_row();
-
-                            ui.label(egui::RichText::new("Último commit").strong());
-                            ui.label(&status.last_commit);
-                            ui.end_row();
-
-                            ui.label(egui::RichText::new("Remoto").strong());
-                            ui.monospace(&status.remote);
-                            ui.end_row();
-
-                            ui.label(egui::RichText::new("Upstream").strong());
-                            ui.monospace(status.sync.upstream.as_deref().unwrap_or("Sin upstream"));
-                            ui.end_row();
-
-                            ui.label(egui::RichText::new("Commits por subir").strong());
-                            ui.label(status.sync.ahead.to_string());
-                            ui.end_row();
-
-                            ui.label(egui::RichText::new("Commits por descargar").strong());
-                            ui.label(status.sync.behind.to_string());
-                            ui.end_row();
-                        });
-                });
+                show_repository_panel(ui, &status);
 
                 ui.add_space(10.0);
 
                 ui.horizontal_wrapped(|ui| {
                     status_card(ui, "Cambios", status.changes.total);
+
                     status_card(ui, "Preparados", status.changes.staged);
+
                     status_card(ui, "Sin preparar", status.changes.unstaged);
+
                     status_card(ui, "Nuevos", status.changes.untracked);
+
                     status_card(ui, "Por subir", status.sync.ahead);
+
                     status_card(ui, "Por descargar", status.sync.behind);
                 });
 
                 ui.add_space(10.0);
-
                 show_health_panel(ui, &snapshot.health);
 
                 ui.add_space(10.0);
-
                 show_history_panel(ui, &snapshot.history);
 
                 ui.add_space(10.0);
-
                 show_anomaly_panel(ui, &snapshot.anomaly_report);
 
                 ui.add_space(10.0);
-
                 show_checklist_panel(ui, &snapshot.checklist);
+
+                ui.add_space(10.0);
+                show_gate_panel(ui, &snapshot.gate);
 
                 if let Some(error) = &snapshot.history_error {
                     ui.add_space(5.0);
@@ -879,87 +891,7 @@ impl OpsDeckApp {
 
                 let mut feedback_action: Option<(String, bool)> = None;
 
-                ui.group(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.heading("OpsDeck Intelligence");
-
-                            ui.label(egui::RichText::new(diagnosis.risk.to_string()).strong());
-                        });
-
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(
-                                egui::RichText::new(format!("{}/100", diagnosis.score))
-                                    .size(28.0)
-                                    .strong(),
-                            );
-                        });
-                    });
-
-                    ui.add_space(6.0);
-                    ui.label(&diagnosis.summary);
-                    ui.add_space(8.0);
-
-                    if diagnosis.findings.is_empty() {
-                        ui.label("No se encontraron problemas.");
-                    } else {
-                        egui::ScrollArea::vertical()
-                            .max_height(320.0)
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                for finding in &diagnosis.findings {
-                                    let summary = snapshot
-                                        .feedback
-                                        .get(&finding.code)
-                                        .copied()
-                                        .unwrap_or_default();
-
-                                    ui.collapsing(
-                                        format!("{} · {}", finding.severity.label(), finding.title),
-                                        |ui| {
-                                            ui.label(&finding.explanation);
-
-                                            ui.add_space(5.0);
-
-                                            ui.label(
-                                                egui::RichText::new(format!(
-                                                    "Acción recomendada: {}",
-                                                    finding.action
-                                                ))
-                                                .strong(),
-                                            );
-
-                                            ui.add_space(3.0);
-
-                                            ui.small(format!(
-                                                "Regla: {} · Penalización adaptada: -{}",
-                                                finding.code, finding.penalty
-                                            ));
-
-                                            ui.add_space(7.0);
-
-                                            ui.horizontal(|ui| {
-                                                if ui.small_button("Útil").clicked() {
-                                                    feedback_action =
-                                                        Some((finding.code.clone(), true));
-                                                }
-
-                                                if ui.small_button("No útil").clicked() {
-                                                    feedback_action =
-                                                        Some((finding.code.clone(), false));
-                                                }
-
-                                                ui.small(format!(
-                                                    "Útil: {} · No útil: {}",
-                                                    summary.useful, summary.not_useful
-                                                ));
-                                            });
-                                        },
-                                    );
-                                }
-                            });
-                    }
-                });
+                show_intelligence_panel(ui, &diagnosis, &snapshot.feedback, &mut feedback_action);
 
                 if let Some((rule_code, useful)) = feedback_action {
                     self.save_rule_feedback(&selected_name, &rule_code, useful);
@@ -1108,6 +1040,212 @@ impl OpsDeckApp {
             self.delete_target = None;
         }
     }
+
+    fn show_policy_window(&mut self, context: &egui::Context) {
+        let Some(mut editor) = self.policy_editor.take() else {
+            return;
+        };
+
+        let mut open = true;
+        let mut save_clicked = false;
+        let mut reset_clicked = false;
+        let mut cancel_clicked = false;
+
+        egui::Window::new(format!("Política de deploy · {}", editor.project_name))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(560.0)
+            .show(context, |ui| {
+                ui.label(
+                    "Configura las condiciones que OpsDeck debe exigir antes de aprobar un deploy.",
+                );
+
+                ui.add_space(10.0);
+
+                let previous_preset = editor.policy.preset;
+
+                egui::Grid::new("policy_editor_grid")
+                    .num_columns(2)
+                    .spacing([24.0, 12.0])
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("Preset").strong());
+
+                        egui::ComboBox::from_id_salt("policy_preset_selector")
+                            .selected_text(editor.policy.preset.label())
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut editor.policy.preset,
+                                    PolicyPreset::Development,
+                                    "Desarrollo",
+                                );
+
+                                ui.selectable_value(
+                                    &mut editor.policy.preset,
+                                    PolicyPreset::Balanced,
+                                    "Equilibrada",
+                                );
+
+                                ui.selectable_value(
+                                    &mut editor.policy.preset,
+                                    PolicyPreset::Production,
+                                    "Producción",
+                                );
+                            });
+
+                        ui.end_row();
+
+                        if editor.policy.preset != previous_preset {
+                            let policy = DeployPolicy::from_preset(editor.policy.preset);
+
+                            editor.max_latency_enabled = policy.max_latency_ms.is_some();
+
+                            editor.max_latency_ms = policy.max_latency_ms.unwrap_or(1_000);
+
+                            editor.policy = policy;
+                        }
+
+                        ui.label(egui::RichText::new("Descripción").strong());
+
+                        ui.label(editor.policy.preset.description());
+
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("Puntuación mínima").strong());
+
+                        ui.add(
+                            egui::DragValue::new(&mut editor.policy.minimum_score)
+                                .range(0..=100)
+                                .suffix("/100"),
+                        );
+
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("Advertencias").strong());
+
+                        ui.checkbox(
+                            &mut editor.policy.strict_warnings,
+                            "Bloquear cuando exista cualquier advertencia",
+                        );
+
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("Health").strong());
+
+                        ui.checkbox(
+                            &mut editor.policy.require_health,
+                            "Exigir un endpoint de health saludable",
+                        );
+
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("Árbol de trabajo").strong());
+
+                        ui.checkbox(
+                            &mut editor.policy.require_clean_tree,
+                            "Exigir que no existan cambios locales",
+                        );
+
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("Commits locales").strong());
+
+                        ui.checkbox(
+                            &mut editor.policy.allow_commits_ahead,
+                            "Permitir commits pendientes de subir",
+                        );
+
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("Latencia máxima").strong());
+
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut editor.max_latency_enabled, "Aplicar límite");
+
+                            ui.add_enabled_ui(editor.max_latency_enabled, |ui| {
+                                ui.add(
+                                    egui::DragValue::new(&mut editor.max_latency_ms)
+                                        .range(1..=120_000)
+                                        .speed(10)
+                                        .suffix(" ms"),
+                                );
+                            });
+                        });
+
+                        ui.end_row();
+                    });
+
+                ui.add_space(10.0);
+                ui.separator();
+
+                ui.small(
+                "Guardar la política vuelve a revisar el proyecto para recalcular el Deploy Gate.",
+            );
+
+                ui.add_space(10.0);
+
+                ui.horizontal(|ui| {
+                    if ui.button("Guardar política").clicked() {
+                        save_clicked = true;
+                    }
+
+                    if ui.button("Restablecer balanced").clicked() {
+                        reset_clicked = true;
+                    }
+
+                    if ui.button("Cancelar").clicked() {
+                        cancel_clicked = true;
+                    }
+                });
+            });
+
+        if save_clicked {
+            let project_name = editor.project_name.clone();
+            let policy = editor.policy_to_save();
+
+            match save_policy(&project_name, &policy) {
+                Ok(path) => {
+                    self.notice = Some(format!(
+                        "Política {} guardada en {}",
+                        policy.preset.label(),
+                        path.display()
+                    ));
+
+                    self.request_project_check(&project_name);
+                }
+
+                Err(error) => {
+                    self.notice = Some(error);
+                    self.policy_editor = Some(editor);
+                }
+            }
+
+            return;
+        }
+
+        if reset_clicked {
+            let project_name = editor.project_name.clone();
+
+            match reset_policy(&project_name) {
+                Ok(_) => {
+                    self.notice = Some(format!("{project_name} volvió a la política Equilibrada"));
+
+                    self.request_project_check(&project_name);
+                }
+
+                Err(error) => {
+                    self.notice = Some(error);
+                    self.policy_editor = Some(editor);
+                }
+            }
+
+            return;
+        }
+
+        if open && !cancel_clicked {
+            self.policy_editor = Some(editor);
+        }
+    }
 }
 
 impl eframe::App for OpsDeckApp {
@@ -1152,7 +1290,59 @@ impl eframe::App for OpsDeckApp {
 
         self.show_add_window(&context);
         self.show_delete_window(&context);
+        self.show_policy_window(&context);
     }
+}
+
+fn show_repository_panel(ui: &mut egui::Ui, status: &ProjectStatus) {
+    ui.group(|ui| {
+        ui.heading(status.state_label());
+        ui.add_space(8.0);
+
+        egui::Grid::new("repository_information")
+            .num_columns(2)
+            .spacing([28.0, 10.0])
+            .show(ui, |ui| {
+                grid_row(ui, "Rama", &status.branch, true);
+
+                grid_row(ui, "Último commit", &status.last_commit, false);
+
+                grid_row(ui, "Remoto", &status.remote, true);
+
+                grid_row(
+                    ui,
+                    "Upstream",
+                    status.sync.upstream.as_deref().unwrap_or("Sin upstream"),
+                    true,
+                );
+
+                grid_row(
+                    ui,
+                    "Commits por subir",
+                    &status.sync.ahead.to_string(),
+                    false,
+                );
+
+                grid_row(
+                    ui,
+                    "Commits por descargar",
+                    &status.sync.behind.to_string(),
+                    false,
+                );
+            });
+    });
+}
+
+fn grid_row(ui: &mut egui::Ui, label: &str, value: &str, monospace: bool) {
+    ui.label(egui::RichText::new(label).strong());
+
+    if monospace {
+        ui.monospace(value);
+    } else {
+        ui.label(value);
+    }
+
+    ui.end_row();
 }
 
 fn show_health_panel(ui: &mut egui::Ui, health: &HealthCheck) {
@@ -1164,26 +1354,14 @@ fn show_health_panel(ui: &mut egui::Ui, health: &HealthCheck) {
                 ui.label(egui::RichText::new(health.state.to_string()).strong());
             });
 
-            ui.with_layout(
-                egui::Layout::right_to_left(egui::Align::Center),
-                |ui| match health.state {
-                    HealthState::Healthy => {
-                        ui.label("Disponible");
-                    }
-
-                    HealthState::Degraded => {
-                        ui.label("Atención");
-                    }
-
-                    HealthState::NotConfigured => {
-                        ui.label("Sin endpoint");
-                    }
-
-                    _ => {
-                        ui.label("Problema detectado");
-                    }
-                },
-            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(match health.state {
+                    HealthState::Healthy => "Disponible",
+                    HealthState::Degraded => "Atención",
+                    HealthState::NotConfigured => "Sin endpoint",
+                    _ => "Problema detectado",
+                });
+            });
         });
 
         ui.add_space(6.0);
@@ -1192,37 +1370,39 @@ fn show_health_panel(ui: &mut egui::Ui, health: &HealthCheck) {
             .num_columns(2)
             .spacing([28.0, 9.0])
             .show(ui, |ui| {
-                ui.label(egui::RichText::new("URL").strong());
+                grid_row(
+                    ui,
+                    "URL",
+                    health.url.as_deref().unwrap_or("Sin configurar"),
+                    true,
+                );
 
-                ui.monospace(health.url.as_deref().unwrap_or("Sin configurar"));
-                ui.end_row();
-
-                ui.label(egui::RichText::new("Código HTTP").strong());
-
-                ui.label(
-                    health
+                grid_row(
+                    ui,
+                    "Código HTTP",
+                    &health
                         .status_code
                         .map(|code| code.to_string())
                         .unwrap_or_else(|| "No disponible".to_string()),
+                    false,
                 );
-                ui.end_row();
 
-                ui.label(egui::RichText::new("Latencia").strong());
-
-                ui.label(
-                    health
+                grid_row(
+                    ui,
+                    "Latencia",
+                    &health
                         .latency_ms
                         .map(|latency| format!("{latency} ms"))
                         .unwrap_or_else(|| "No disponible".to_string()),
+                    false,
                 );
-                ui.end_row();
 
-                ui.label(egui::RichText::new("Content-Type").strong());
-
-                ui.monospace(health.content_type.as_deref().unwrap_or("No disponible"));
-                ui.end_row();
-
-                ui.label(egui::RichText::new("JSON válido").strong());
+                grid_row(
+                    ui,
+                    "Content-Type",
+                    health.content_type.as_deref().unwrap_or("No disponible"),
+                    true,
+                );
 
                 let json_label = match health.json_valid {
                     Some(true) => "Sí",
@@ -1230,8 +1410,7 @@ fn show_health_panel(ui: &mut egui::Ui, health: &HealthCheck) {
                     None => "No aplica",
                 };
 
-                ui.label(json_label);
-                ui.end_row();
+                grid_row(ui, "JSON válido", json_label, false);
             });
 
         if let Some(error) = &health.error {
@@ -1278,23 +1457,14 @@ fn show_anomaly_panel(ui: &mut egui::Ui, report: &AnomalyReport) {
         ui.add_space(6.0);
         ui.label(&report.summary);
 
-        if report.anomalies.is_empty() {
-            return;
-        }
-
-        ui.add_space(8.0);
-
         for anomaly in &report.anomalies {
             ui.collapsing(format!("{} · {}", anomaly.severity, anomaly.title), |ui| {
                 ui.label(&anomaly.explanation);
-
                 ui.add_space(5.0);
 
                 ui.label(
                     egui::RichText::new(format!("Acción recomendada: {}", anomaly.action)).strong(),
                 );
-
-                ui.add_space(3.0);
 
                 ui.small(format!("Código: {}", anomaly.code));
             });
@@ -1343,11 +1513,185 @@ fn show_checklist_panel(ui: &mut egui::Ui, checklist: &DeployChecklist) {
 
             ui.collapsing(format!("{symbol} {} · {}", item.state, item.title), |ui| {
                 ui.label(&item.detail);
-                ui.add_space(3.0);
 
                 ui.small(format!("Código: {}", item.code));
             });
         }
+    });
+}
+
+fn show_gate_panel(ui: &mut egui::Ui, gate: &DeployGate) {
+    ui.group(|ui| {
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.heading("Deploy Gate");
+
+                ui.label(
+                    egui::RichText::new(gate.decision.to_string())
+                        .strong()
+                        .size(18.0),
+                );
+            });
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(if gate.ready {
+                    "Operación permitida"
+                } else {
+                    "Operación bloqueada"
+                });
+            });
+        });
+
+        ui.add_space(6.0);
+        ui.label(&gate.summary);
+        ui.add_space(8.0);
+
+        egui::Grid::new("gate_policy_information")
+            .num_columns(2)
+            .spacing([28.0, 8.0])
+            .show(ui, |ui| {
+                grid_row(ui, "Política", gate.policy.preset.label(), false);
+
+                grid_row(
+                    ui,
+                    "Puntuación mínima",
+                    &format!("{}/100", gate.policy.minimum_score),
+                    false,
+                );
+
+                grid_row(
+                    ui,
+                    "Health obligatorio",
+                    yes_no(gate.policy.require_health),
+                    false,
+                );
+
+                grid_row(
+                    ui,
+                    "Árbol limpio",
+                    yes_no(gate.policy.require_clean_tree),
+                    false,
+                );
+
+                grid_row(
+                    ui,
+                    "Advertencias estrictas",
+                    yes_no(gate.policy.strict_warnings),
+                    false,
+                );
+
+                grid_row(
+                    ui,
+                    "Latencia máxima",
+                    &gate
+                        .policy
+                        .max_latency_ms
+                        .map(|value| format!("{value} ms"))
+                        .unwrap_or_else(|| "Sin límite".to_string()),
+                    false,
+                );
+            });
+
+        if !gate.blockers.is_empty() {
+            ui.add_space(8.0);
+
+            ui.label(egui::RichText::new("Bloqueos").strong());
+
+            for blocker in &gate.blockers {
+                ui.label(format!("× {blocker}"));
+            }
+        }
+
+        if !gate.warnings.is_empty() {
+            ui.add_space(8.0);
+
+            ui.label(egui::RichText::new("Advertencias").strong());
+
+            for warning in &gate.warnings {
+                ui.label(format!("! {warning}"));
+            }
+        }
+    });
+}
+
+fn show_intelligence_panel(
+    ui: &mut egui::Ui,
+    diagnosis: &Diagnosis,
+    feedback: &HashMap<String, FeedbackSummary>,
+    feedback_action: &mut Option<(String, bool)>,
+) {
+    ui.group(|ui| {
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.heading("OpsDeck Intelligence");
+
+                ui.label(egui::RichText::new(diagnosis.risk.to_string()).strong());
+            });
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(format!("{}/100", diagnosis.score))
+                        .size(28.0)
+                        .strong(),
+                );
+            });
+        });
+
+        ui.add_space(6.0);
+        ui.label(&diagnosis.summary);
+        ui.add_space(8.0);
+
+        if diagnosis.findings.is_empty() {
+            ui.label("No se encontraron problemas.");
+            return;
+        }
+
+        egui::ScrollArea::vertical()
+            .max_height(320.0)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for finding in &diagnosis.findings {
+                    let summary = feedback.get(&finding.code).copied().unwrap_or_default();
+
+                    ui.collapsing(
+                        format!("{} · {}", finding.severity.label(), finding.title),
+                        |ui| {
+                            ui.label(&finding.explanation);
+                            ui.add_space(5.0);
+
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Acción recomendada: {}",
+                                    finding.action
+                                ))
+                                .strong(),
+                            );
+
+                            ui.small(format!(
+                                "Regla: {} · Penalización adaptada: -{}",
+                                finding.code, finding.penalty
+                            ));
+
+                            ui.add_space(7.0);
+
+                            ui.horizontal(|ui| {
+                                if ui.small_button("Útil").clicked() {
+                                    *feedback_action = Some((finding.code.clone(), true));
+                                }
+
+                                if ui.small_button("No útil").clicked() {
+                                    *feedback_action = Some((finding.code.clone(), false));
+                                }
+
+                                ui.small(format!(
+                                    "Útil: {} · No útil: {}",
+                                    summary.useful, summary.not_useful
+                                ));
+                            });
+                        },
+                    );
+                }
+            });
     });
 }
 
@@ -1384,4 +1728,8 @@ fn load_feedback_map(
     }
 
     feedback
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "Sí" } else { "No" }
 }
