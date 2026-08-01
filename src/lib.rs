@@ -7,6 +7,7 @@ pub mod history_ui;
 pub mod intelligence;
 pub mod learning;
 pub mod monitor;
+pub mod platform;
 pub mod report;
 
 use serde::{Deserialize, Serialize};

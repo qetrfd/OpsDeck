@@ -10,11 +10,9 @@ use opsdeck::history::{FeedbackSummary, ReviewRecord, feedback_summary, record_f
 use opsdeck::history_ui::show_history_panel;
 use opsdeck::intelligence::Diagnosis;
 use opsdeck::monitor::{MonitorEvent, MonitorHandle, MonitorResult, spawn_monitor_worker};
+use opsdeck::platform::{open_in_file_manager, open_in_vscode};
 use opsdeck::report::{export_deploy_report, suggested_report_filename};
-use opsdeck::{
-    Project, ProjectStatus, add_project, config_path, load_config, open_in_file_manager,
-    open_in_vscode, save_config,
-};
+use opsdeck::{Project, ProjectStatus, add_project, config_path, load_config, save_config};
 use rfd::FileDialog;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
