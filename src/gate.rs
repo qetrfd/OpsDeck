@@ -31,18 +31,15 @@ impl fmt::Display for GateDecision {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PolicyPreset {
     Development,
-    Balanced,
-    Production,
-}
 
-impl Default for PolicyPreset {
-    fn default() -> Self {
-        Self::Balanced
-    }
+    #[default]
+    Balanced,
+
+    Production,
 }
 
 impl PolicyPreset {
@@ -57,7 +54,9 @@ impl PolicyPreset {
     pub fn description(self) -> &'static str {
         match self {
             Self::Development => "Permite trabajar con cambios locales y advertencias.",
+
             Self::Balanced => "Bloquea problemas importantes sin exigir condiciones de producción.",
+
             Self::Production => "Aplica controles estrictos antes de permitir un deploy.",
         }
     }
@@ -476,10 +475,12 @@ pub fn evaluate_deploy_gate(
     let ready = decision != GateDecision::Blocked;
 
     let summary = match decision {
-        GateDecision::Approved => format!(
-            "Deploy aprobado con la política {}. Los {} requisitos fueron superados.",
-            policy.preset, checklist.passed
-        ),
+        GateDecision::Approved => {
+            format!(
+                "Deploy aprobado con la política {}. Los {} requisitos fueron superados.",
+                policy.preset, checklist.passed
+            )
+        }
 
         GateDecision::ApprovedWithWarnings => {
             format!(
@@ -489,12 +490,14 @@ pub fn evaluate_deploy_gate(
             )
         }
 
-        GateDecision::Blocked => format!(
-            "Deploy bloqueado por la política {}: {} bloqueo(s) y {} advertencia(s).",
-            policy.preset,
-            blockers.len(),
-            warnings.len()
-        ),
+        GateDecision::Blocked => {
+            format!(
+                "Deploy bloqueado por la política {}: {} bloqueo(s) y {} advertencia(s).",
+                policy.preset,
+                blockers.len(),
+                warnings.len()
+            )
+        }
     };
 
     let manifest = GateManifest {
@@ -696,7 +699,9 @@ mod tests {
     fn status() -> ProjectStatus {
         ProjectStatus {
             name: "Demo".to_string(),
+
             path: PathBuf::from("/tmp/demo"),
+
             registered: true,
 
             health_url: Some("https://example.com/health".to_string()),
@@ -742,6 +747,7 @@ mod tests {
     fn diagnosis(score: u8) -> Diagnosis {
         Diagnosis {
             score,
+
             risk: RiskLevel::Healthy,
 
             summary: "Sin problemas".to_string(),
@@ -865,14 +871,14 @@ mod tests {
         assert!(
             gate.blockers
                 .iter()
-                .any(|blocker| blocker.contains("POLICY_MINIMUM_SCORE"))
+                .any(|blocker| { blocker.contains("POLICY_MINIMUM_SCORE",) })
         );
     }
 
     #[test]
     fn creates_safe_manifest_filename() {
         assert_eq!(
-            suggested_gate_filename("Kuali Web"),
+            suggested_gate_filename("Kuali Web",),
             "kuali-web-deploy-gate.json"
         );
     }

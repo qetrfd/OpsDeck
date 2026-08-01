@@ -36,40 +36,61 @@ pub fn generate_deploy_report(
     let mut report = String::new();
 
     writeln!(report, "# OpsDeck Deploy Report").unwrap();
+
     writeln!(report).unwrap();
+
     writeln!(report, "**Proyecto:** {project_name}").unwrap();
+
     writeln!(report, "**Generado:** {generated_at}").unwrap();
+
     writeln!(report, "**Decisión:** {decision_symbol} {decision}").unwrap();
+
     writeln!(report).unwrap();
 
     writeln!(report, "## Resumen ejecutivo").unwrap();
+
     writeln!(report).unwrap();
+
     writeln!(report, "{}", anomaly_report.summary).unwrap();
+
     writeln!(report).unwrap();
+
     writeln!(report, "- Puntuación: **{}/100**", diagnosis.score).unwrap();
+
     writeln!(report, "- Nivel de riesgo: **{}**", diagnosis.risk).unwrap();
+
     writeln!(report, "- Estado de health: **{}**", health.state).unwrap();
+
     writeln!(
         report,
         "- Anomalías detectadas: **{}**",
         anomaly_report.anomalies.len()
     )
     .unwrap();
+
     writeln!(report).unwrap();
 
     writeln!(report, "## Estado del repositorio").unwrap();
+
     writeln!(report).unwrap();
+
     writeln!(report, "| Campo | Valor |").unwrap();
+
     writeln!(report, "|---|---|").unwrap();
+
     writeln!(report, "| Ruta | `{}` |", status.path.display()).unwrap();
+
     writeln!(report, "| Rama | `{}` |", status.branch).unwrap();
+
     writeln!(
         report,
         "| Último commit | {} |",
-        markdown_cell(&status.last_commit)
+        markdown_cell(&status.last_commit,)
     )
     .unwrap();
-    writeln!(report, "| Remoto | {} |", markdown_cell(&status.remote)).unwrap();
+
+    writeln!(report, "| Remoto | {} |", markdown_cell(&status.remote,)).unwrap();
+
     writeln!(
         report,
         "| Upstream | {} |",
@@ -78,27 +99,39 @@ pub fn generate_deploy_report(
             .upstream
             .as_deref()
             .map(markdown_cell)
-            .unwrap_or_else(|| "Sin upstream".to_string())
+            .unwrap_or_else(|| { "Sin upstream".to_string() })
     )
     .unwrap();
+
     writeln!(report, "| Commits por subir | {} |", status.sync.ahead).unwrap();
+
     writeln!(report, "| Commits por descargar | {} |", status.sync.behind).unwrap();
+
     writeln!(report, "| Cambios totales | {} |", status.changes.total).unwrap();
+
     writeln!(report, "| Cambios preparados | {} |", status.changes.staged).unwrap();
+
     writeln!(
         report,
         "| Cambios sin preparar | {} |",
         status.changes.unstaged
     )
     .unwrap();
+
     writeln!(report, "| Archivos nuevos | {} |", status.changes.untracked).unwrap();
+
     writeln!(report).unwrap();
 
     writeln!(report, "## Health check").unwrap();
+
     writeln!(report).unwrap();
+
     writeln!(report, "| Campo | Valor |").unwrap();
+
     writeln!(report, "|---|---|").unwrap();
+
     writeln!(report, "| Estado | {} |", health.state).unwrap();
+
     writeln!(
         report,
         "| URL | {} |",
@@ -106,27 +139,30 @@ pub fn generate_deploy_report(
             .url
             .as_deref()
             .map(markdown_cell)
-            .unwrap_or_else(|| "Sin configurar".to_string())
+            .unwrap_or_else(|| { "Sin configurar".to_string() })
     )
     .unwrap();
+
     writeln!(
         report,
         "| Código HTTP | {} |",
         health
             .status_code
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "No disponible".to_string())
+            .map(|value| { value.to_string() })
+            .unwrap_or_else(|| { "No disponible".to_string() })
     )
     .unwrap();
+
     writeln!(
         report,
         "| Latencia | {} |",
         health
             .latency_ms
-            .map(|value| format!("{value} ms"))
-            .unwrap_or_else(|| "No disponible".to_string())
+            .map(|value| { format!("{value} ms") })
+            .unwrap_or_else(|| { "No disponible".to_string() })
     )
     .unwrap();
+
     writeln!(
         report,
         "| Content-Type | {} |",
@@ -134,7 +170,7 @@ pub fn generate_deploy_report(
             .content_type
             .as_deref()
             .map(markdown_cell)
-            .unwrap_or_else(|| "No disponible".to_string())
+            .unwrap_or_else(|| { "No disponible".to_string() })
     )
     .unwrap();
 
@@ -153,8 +189,11 @@ pub fn generate_deploy_report(
     writeln!(report).unwrap();
 
     writeln!(report, "## OpsDeck Intelligence").unwrap();
+
     writeln!(report).unwrap();
+
     writeln!(report, "{}", diagnosis.summary).unwrap();
+
     writeln!(report).unwrap();
 
     if diagnosis.findings.is_empty() {
@@ -168,16 +207,23 @@ pub fn generate_deploy_report(
                 finding.title
             )
             .unwrap();
+
             writeln!(report).unwrap();
+
             writeln!(report, "- **Regla:** `{}`", finding.code).unwrap();
+
             writeln!(report, "- **Penalización adaptada:** -{}", finding.penalty).unwrap();
+
             writeln!(report, "- **Análisis:** {}", finding.explanation).unwrap();
+
             writeln!(report, "- **Acción recomendada:** {}", finding.action).unwrap();
+
             writeln!(report).unwrap();
         }
     }
 
     writeln!(report, "## Análisis de anomalías").unwrap();
+
     writeln!(report).unwrap();
 
     if anomaly_report.anomalies.is_empty() {
@@ -189,15 +235,21 @@ pub fn generate_deploy_report(
     } else {
         for anomaly in &anomaly_report.anomalies {
             writeln!(report, "### {} · {}", anomaly.severity, anomaly.title).unwrap();
+
             writeln!(report).unwrap();
+
             writeln!(report, "- **Código:** `{}`", anomaly.code).unwrap();
+
             writeln!(report, "- **Explicación:** {}", anomaly.explanation).unwrap();
+
             writeln!(report, "- **Acción recomendada:** {}", anomaly.action).unwrap();
+
             writeln!(report).unwrap();
         }
     }
 
     writeln!(report, "## Historial reciente").unwrap();
+
     writeln!(report).unwrap();
 
     if history.is_empty() {
@@ -208,6 +260,7 @@ pub fn generate_deploy_report(
             "| Fecha | Puntuación | Riesgo | Health | HTTP | Latencia | Cambios |"
         )
         .unwrap();
+
         writeln!(report, "|---:|---:|---|---|---:|---:|---:|").unwrap();
 
         for review in history.iter().take(HISTORY_ROWS) {
@@ -226,8 +279,8 @@ pub fn generate_deploy_report(
                 "| {} | {}/100 | {} | {} | {} | {} | {} |",
                 review.checked_at,
                 review.score,
-                markdown_cell(&review.risk),
-                markdown_cell(&review.health_state),
+                markdown_cell(&review.risk,),
+                markdown_cell(&review.health_state,),
                 status_code,
                 latency,
                 review.changes_total
@@ -237,19 +290,25 @@ pub fn generate_deploy_report(
     }
 
     writeln!(report).unwrap();
+
     writeln!(report, "## Cambios locales").unwrap();
+
     writeln!(report).unwrap();
 
     if status.raw_status.trim().is_empty() {
         writeln!(report, "No hay cambios locales pendientes.").unwrap();
     } else {
         writeln!(report, "```text").unwrap();
+
         writeln!(report, "{}", status.raw_status.trim()).unwrap();
+
         writeln!(report, "```").unwrap();
     }
 
     writeln!(report).unwrap();
+
     writeln!(report, "---").unwrap();
+
     writeln!(report, "Informe generado localmente por OpsDeck.").unwrap();
 
     report
@@ -275,6 +334,7 @@ pub fn export_deploy_report(
 
     let path = match output {
         Some(path) => path.to_path_buf(),
+
         None => default_report_path(project_name)?,
     };
 
@@ -315,6 +375,7 @@ pub fn default_report_path(project_name: &str) -> Result<PathBuf, String> {
 
 fn slugify(value: &str) -> String {
     let mut result = String::new();
+
     let mut previous_separator = false;
 
     for character in value.trim().to_lowercase().chars() {
@@ -339,10 +400,7 @@ fn slugify(value: &str) -> String {
 }
 
 fn markdown_cell(value: &str) -> String {
-    value
-        .replace('|', "\\|")
-        .replace('\n', " ")
-        .replace('\r', " ")
+    value.replace('|', "\\|").replace(['\n', '\r'], " ")
 }
 
 fn unix_timestamp() -> u64 {
@@ -359,18 +417,29 @@ mod tests {
     #[test]
     fn creates_safe_report_filename() {
         assert_eq!(
-            suggested_report_filename("Kuali Web"),
+            suggested_report_filename("Kuali Web",),
             "kuali-web-deploy-report.md"
         );
     }
 
     #[test]
     fn empty_project_name_has_fallback() {
-        assert_eq!(suggested_report_filename("   "), "project-deploy-report.md");
+        assert_eq!(
+            suggested_report_filename("   ",),
+            "project-deploy-report.md"
+        );
     }
 
     #[test]
     fn markdown_table_cells_are_escaped() {
-        assert_eq!(markdown_cell("main | production"), "main \\| production");
+        assert_eq!(markdown_cell("main | production",), "main \\| production");
+    }
+
+    #[test]
+    fn markdown_line_breaks_are_removed() {
+        assert_eq!(
+            markdown_cell("primera\nsegunda\rtercera",),
+            "primera segunda tercera"
+        );
     }
 }
