@@ -1,7 +1,12 @@
-use std::env;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use std::env;
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use std::path::PathBuf;
 
 pub fn platform_name() -> &'static str {
     #[cfg(target_os = "macos")]
@@ -316,6 +321,7 @@ fn spawn_detached(command: &mut Command) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
