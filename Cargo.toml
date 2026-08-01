@@ -1,8 +1,13 @@
 [package]
 name = "opsdeck"
-version = "0.3.0"
+version = "1.0.0"
 edition = "2024"
 default-run = "opsdeck"
+description = "Centro de control local para proyectos, health checks y decisiones de deploy"
+license = "MIT"
+repository = "https://github.com/qetrfd/OpsDeck"
+keywords = ["git", "devops", "monitoring", "deployment", "desktop"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
@@ -11,3 +16,10 @@ reqwest = { version = "0.13", features = ["blocking"] }
 rfd = "0.17"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = 3
+panic = "abort"
+strip = "symbols"
