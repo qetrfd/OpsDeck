@@ -7,11 +7,11 @@ pub mod history_ui;
 pub mod intelligence;
 pub mod learning;
 pub mod monitor;
+pub mod paths;
 pub mod platform;
 pub mod report;
 
 use serde::{Deserialize, Serialize};
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -187,19 +187,7 @@ pub fn save_config(config: &Config) -> Result<(), String> {
 }
 
 pub fn config_path() -> Result<PathBuf, String> {
-    if let Ok(custom_path) = env::var("OPSDECK_CONFIG") {
-        let custom_path = custom_path.trim();
-
-        if !custom_path.is_empty() {
-            return Ok(PathBuf::from(custom_path));
-        }
-    }
-
-    let home = env::var("HOME")
-        .or_else(|_| env::var("USERPROFILE"))
-        .map_err(|_| "No se pudo encontrar la carpeta del usuario".to_string())?;
-
-    Ok(PathBuf::from(home).join(".opsdeck").join("projects.json"))
+    crate::paths::data_file("projects.json")
 }
 
 pub fn resolve_project_target(target: &str) -> Result<ResolvedProject, String> {

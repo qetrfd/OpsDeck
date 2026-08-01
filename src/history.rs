@@ -3,7 +3,6 @@ use crate::health::HealthCheck;
 use crate::intelligence::Diagnosis;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -54,16 +53,7 @@ pub struct FeedbackSummary {
 }
 
 pub fn history_path() -> Result<PathBuf, String> {
-    let home = env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| "No se pudo localizar la carpeta del usuario".to_string())?;
-
-    let directory = home.join(".opsdeck");
-
-    fs::create_dir_all(&directory)
-        .map_err(|error| format!("No se pudo crear {}: {error}", directory.display()))?;
-
-    Ok(directory.join("history.json"))
+    crate::paths::data_file("history.json")
 }
 
 pub fn load_history() -> Result<HistoryStore, String> {

@@ -3,7 +3,6 @@ use crate::anomaly::AnomalyReport;
 use crate::health::HealthCheck;
 use crate::history::ReviewRecord;
 use crate::intelligence::Diagnosis;
-use std::env;
 use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -357,14 +356,7 @@ pub fn suggested_report_filename(project_name: &str) -> String {
 }
 
 pub fn default_report_path(project_name: &str) -> Result<PathBuf, String> {
-    let home = env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| "No se pudo localizar la carpeta del usuario".to_string())?;
-
-    let directory = home.join(".opsdeck").join("reports");
-
-    fs::create_dir_all(&directory)
-        .map_err(|error| format!("No se pudo crear {}: {error}", directory.display()))?;
+    let directory = crate::paths::data_subdir("reports")?;
 
     Ok(directory.join(format!(
         "{}-deploy-report-{}.md",

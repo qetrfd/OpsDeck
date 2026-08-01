@@ -4,7 +4,6 @@ use crate::checklist::{CheckState, DeployChecklist};
 use crate::health::{HealthCheck, HealthState};
 use crate::intelligence::Diagnosis;
 use serde::{Deserialize, Serialize};
-use std::env;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -280,16 +279,7 @@ impl DeployGate {
 }
 
 pub fn policy_path() -> Result<PathBuf, String> {
-    let home = env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| "No se pudo localizar la carpeta del usuario.".to_string())?;
-
-    let directory = home.join(".opsdeck");
-
-    fs::create_dir_all(&directory)
-        .map_err(|error| format!("No se pudo crear {}: {error}", directory.display()))?;
-
-    Ok(directory.join("policies.json"))
+    crate::paths::data_file("policies.json")
 }
 
 pub fn load_policy(project_name: &str) -> Result<DeployPolicy, String> {
@@ -593,14 +583,7 @@ pub fn suggested_gate_filename(project_name: &str) -> String {
 }
 
 pub fn default_gate_path(project_name: &str) -> Result<PathBuf, String> {
-    let home = env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| "No se pudo localizar la carpeta del usuario.".to_string())?;
-
-    let directory = home.join(".opsdeck").join("gates");
-
-    fs::create_dir_all(&directory)
-        .map_err(|error| format!("No se pudo crear {}: {error}", directory.display()))?;
+    let directory = crate::paths::data_subdir("gates")?;
 
     Ok(directory.join(format!(
         "{}-deploy-gate-{}.json",
